@@ -76,9 +76,48 @@ def cli_main(argv: list[str]) -> int:
             version = data.get("version", "unknown")
             cams = client.call("camlist")
             ncams = len(cams) if isinstance(cams, list) else 0
+            # If admin creds are configured, validate them BEFORE printing the
+            # "OK" banner. Otherwise an operator (or a script greping stdout
+            # for OK) would see a misleading success line before the admin
+            # failure that exits 1.
+            if client.admin is not None:
+                try:
+                    admin_data = client.admin_login()
+                except BiError as e:
+                    print(
+                        f"FAIL [{e.kind}] admin user '{client.admin.user}' login failed: {e}",
+                        file=sys.stderr,
+                    )
+                    print(f"hint: {e.hint}", file=sys.stderr)
+                    return 1
+                # Auth succeeded, but BI lets non-admin users log in too — the
+                # login response carries an `admin` capability flag we can
+                # check directly. Without it, admin-gated cmds (log, etc.)
+                # will silently fail later.
+                if not admin_data.get("admin"):
+                    print(
+                        f"FAIL — user '{client.admin.user}' logged in, but Blue "
+                        f"Iris reports admin=false for this user. Admin-gated "
+                        f"tools (bi_log, deep bi_camera_config) will not work.",
+                        file=sys.stderr,
+                    )
+                    print(
+                        f"hint: enable Admin for '{client.admin.user}' in Blue "
+                        f"Iris → Settings → Users, or point BI_ADMIN_USER at a "
+                        f"user that already has it.",
+                        file=sys.stderr,
+                    )
+                    return 1
+            if client.admin is None:
+                admin_status = "not set (admin-gated tools disabled)"
+            elif client.admin is client.read:
+                admin_status = f"primary user '{client.read.user}' has admin"
+            else:
+                admin_status = f"separate user '{client.admin.user}'"
             print(
-                f"OK — connected to Blue Iris {version} at {client.host}:{client.port}, "
-                f"{ncams} cameras found"
+                f"OK — connected to Blue Iris {version} at "
+                f"{client.read.host}:{client.read.port} as '{client.read.user}', "
+                f"{ncams} cameras found; admin: {admin_status}"
             )
             return 0
         except BiError as e:

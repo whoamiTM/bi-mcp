@@ -92,6 +92,34 @@ def shape_camlist(raw: Any, limit: int | None = None) -> list[dict[str, Any]]:
     return out
 
 
+def shape_camera_config_deep(raw: Any) -> Any:
+    """Shape the `camconfig` response — a single camera's config dict.
+
+    `camconfig` is undocumented in the BI manual but works on 5.9.9.71. The
+    response is a flat dict with a few nested sub-dicts (`setmotion`,
+    `setpost`, etc.). We don't enumerate every key — BI may add fields over
+    time — we just drop empties recursively and ISO-ify recognised timestamps.
+    """
+    if not isinstance(raw, dict):
+        return {"raw": raw}
+    ts_keys = ("lastalertutc", "newalertsutc", "utc", "lastupdate")
+
+    def _walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            cleaned = {}
+            for k, v in node.items():
+                walked = _walk(v)
+                if walked in (None, "", [], {}):
+                    continue
+                cleaned[k] = walked
+            return _replace_ts(cleaned, ts_keys)
+        if isinstance(node, list):
+            return [_walk(x) for x in node]
+        return node
+
+    return _walk(raw)
+
+
 def shape_camera_config(raw: Any, short_name: str) -> dict[str, Any] | None:
     """From a `camlist` response, pick the single camera matching short_name."""
     if not isinstance(raw, list):

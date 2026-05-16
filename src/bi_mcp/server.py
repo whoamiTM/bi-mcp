@@ -19,7 +19,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-from .client import BiClient, from_env
+from .client import BiClients, from_env
 from .errors import BiError
 from .logging_setup import get_logger, setup_logging
 from .tools import TOOL_DESCRIPTIONS, TOOLS
@@ -137,8 +137,13 @@ async def _serve() -> None:
     log = get_logger()
 
     server: Server = Server("bi-mcp")
-    client: BiClient = from_env()
-    log.info("bi-mcp server starting; BI endpoint=%s:%s", client.host, client.port)
+    client: BiClients = from_env()
+    log.info(
+        "bi-mcp server starting; BI endpoint=%s:%s admin=%s",
+        client.read.host,
+        client.read.port,
+        "yes" if client.admin is not None else "no",
+    )
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:

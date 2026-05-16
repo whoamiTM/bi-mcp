@@ -39,6 +39,18 @@ class BiAuthFailed(BiError):
     )
 
 
+class BiAdminAuthFailed(BiAuthFailed):
+    """Variant of BiAuthFailed for the optional admin user — points operators
+    at BI_ADMIN_USER/BI_ADMIN_PASS instead of the read-user creds."""
+
+    kind = "admin_auth"
+    hint = (
+        "Blue Iris rejected the admin login. Check BI_ADMIN_USER and "
+        "BI_ADMIN_PASS in .env. Note: Blue Iris locks accounts after repeated "
+        "failed logins."
+    )
+
+
 class BiNotFound(BiError):
     kind = "not_found"
     hint = "The requested camera, clip, or alert does not exist on this Blue Iris install."
@@ -47,3 +59,16 @@ class BiNotFound(BiError):
 class BiBadRequest(BiError):
     kind = "bad_request"
     hint = "The arguments to this tool were malformed. Check the tool's documented parameters."
+
+
+class BiAdminRequired(BiError):
+    """The requested cmd is gated behind admin BI credentials, but the server
+    is configured with only the read-only user. Distinct from BiAuthFailed
+    (which is "I tried to log in and BI said no") and from a generic BiError
+    "Access denied" (which is BI's own wording mid-session)."""
+
+    kind = "admin_required"
+    hint = (
+        "This tool requires admin Blue Iris credentials. Set BI_ADMIN_USER "
+        "and BI_ADMIN_PASS in bi-mcp/.env to a BI user with admin enabled."
+    )
