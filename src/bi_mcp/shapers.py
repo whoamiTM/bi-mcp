@@ -147,10 +147,14 @@ def shape_alert_tracks(raw: Any) -> Any:
 
 
 def shape_clip_info(raw: Any) -> dict[str, Any]:
-    """Shape the `clipstats` response — forensic detail for one clip/alert."""
+    """Shape the `clipstats` response — forensic detail for one clip/alert.
+
+    Per manual: `offset` is the millisecond offset within the parent clip —
+    NOT a timestamp. Don't run it through `_replace_ts`.
+    """
     if not isinstance(raw, dict):
         return {"raw": raw}
-    return _drop_empty(_replace_ts(raw, ("utc", "offset")))
+    return _drop_empty(_replace_ts(raw, ("utc", "date")))
 
 
 def shape_timeline(raw: Any) -> Any:

@@ -59,8 +59,9 @@ def _tool_camera_config(client: BiClient, args: dict) -> Any:
 
 def _tool_log(client: BiClient, args: dict) -> Any:
     payload: dict[str, Any] = {}
-    # Pass-through the args that BI's `log` cmd accepts.
-    for k in ("level", "id", "reset"):
+    # Pass-through only read-side args. `reset=true` clears the Status/Log
+    # display in Blue Iris — that's a mutation, deliberately not exposed.
+    for k in ("level", "id"):
         if k in args:
             payload[k] = args[k]
     raw = client.call("log", **payload)
@@ -76,7 +77,9 @@ def _tool_alerts(client: BiClient, args: dict) -> Any:
             "or 'Index' for all cameras)"
         )
     payload: dict[str, Any] = {}
-    for k in ("camera", "startdate", "enddate", "reset", "view", "search"):
+    # `reset=true` clears the current user's new-alert counters in BI — that's
+    # a mutation. Deliberately not forwarded.
+    for k in ("camera", "startdate", "enddate", "view", "search"):
         if k in args:
             payload[k] = args[k]
     raw = client.call("alertlist", **payload)
@@ -122,7 +125,9 @@ def _tool_ptz_status(client: BiClient, args: dict) -> Any:
     camera = args.get("camera")
     if not camera:
         raise BiBadRequest("bi_ptz_status requires a 'camera' argument (camera short name)")
-    raw = client.call("ptz", camera=camera, button=-1)
+    # Per BI manual: omit `button` to query PTZ status; a button value triggers
+    # an actual PTZ operation.
+    raw = client.call("ptz", camera=camera)
     if args.get("raw"):
         return raw
     return shapers.shape_ptz_status(raw)
