@@ -129,7 +129,7 @@ Blue Iris JSON instead of the trimmed view.
 | `bi_session_info` | `login` data | BI version, license, time zone, current user's capabilities, available profile/schedule/stream names. |
 | `bi_cameras` | `camlist` | All cameras and groups: online state, trigger counts, stream health, last alert. |
 | `bi_camera_config` | `camlist` filtered | Full config + current state for one camera by short name. |
-| `bi_log` | `log` | Recent system log entries. Params: `level`, `limit`. |
+| `bi_log` | `log` | Recent system log entries. Params: `level`, `limit`. **Requires admin** — see Security note. |
 | `bi_alerts` | `alertlist` | Recent alerts with AI memo, object/confidence, zones, clip path. Params: `camera`, `startdate`, `enddate`, `limit`. |
 | `bi_alert_tracks` | `tracks` | AI per-frame bounding boxes inside one alert. Param: `path`. |
 | `bi_clip_info` | `clipstats` | Forensic detail for one clip: resolution, duration, profile/schedule/zones at trigger. Param: `path`. |
@@ -180,6 +180,15 @@ MCP client at a time. It should not be exposed to the internet.
 
 `.env` is gitignored. Never commit it. If you commit credentials by accident,
 delete the user in Blue Iris immediately and create a new one.
+
+### Why `bi_log` returns "Access denied" for the recommended user
+
+Blue Iris gates the `log` JSON command behind admin. The non-admin user above
+will see an `Access denied` error when calling `bi_log`. This is intentional:
+the read-only contract of this server is more valuable than one tool. If you
+genuinely need log access during diagnosis, paste the relevant log lines from
+BI's Status window manually — or grant the MCP user admin and accept the
+larger blast radius if `.env` ever leaks.
 
 ## License
 

@@ -166,7 +166,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "bi_log": (
         "Recent Blue Iris system log entries. Optional 'level' (0=info, 1=warning, "
-        "2=error) and 'limit' (default 100)."
+        "2=error) and 'limit' (default 100). NOTE: Blue Iris gates the `log` cmd "
+        "behind admin; a read-only user will get 'Access denied'."
     ),
     "bi_alerts": (
         "Recent alerts with AI memo (object, confidence, license plate), zones "
