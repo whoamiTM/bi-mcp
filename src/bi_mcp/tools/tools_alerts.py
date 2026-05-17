@@ -64,8 +64,11 @@ def register() -> None:
         description=(
             "Recent alerts with AI memo (object, confidence, license plate), zones "
             "triggered, and clip path. Requires 'camera' short name (or 'Index' for all). "
-            "Optional 'startdate'/'enddate' (unix epoch), 'view' (e.g. 'people', "
-            "'vehicles'), 'search' (memo text). 'limit' default 50."
+            "Optional 'startdate'/'enddate' (unix epoch), 'view' (filter; see schema "
+            "for full enum), 'search' (memo substring). 'limit' default 50. "
+            "Crossover note: if 'view' is set to 'flagged', BI may also return *clip* "
+            "items here; those clips lack the 'zones' field and their 'msec' is the "
+            "clip length, not alert length."
         ),
         schema={
             "type": "object",
@@ -79,9 +82,17 @@ def register() -> None:
                 "enddate": {"type": "integer", "description": "Unix epoch end."},
                 "view": {
                     "type": "string",
-                    "description": "Database view filter, e.g. 'people', 'vehicles', 'flagged'.",
+                    "description": (
+                        "Database view filter. Per BI manual § *alertlist*: 'all', "
+                        "'new', 'stored', 'alerts', 'aux1'..'aux7', 'flagged', 'export', "
+                        "'archive', 'people', 'vehicles', 'confirmed', 'canceled'. "
+                        "Per UI3 source (additional values it sends): 'zonea'..'zoneh', "
+                        "'dio', 'onvif', 'audio', 'external', 'cancelled' (British). "
+                        "Crossover: 'flagged' may also return clip items (no 'zones' "
+                        "field); see manual § *cliplist* note on shared views."
+                    ),
                 },
-                "search": {"type": "string", "description": "Memo substring filter."},
+                "search": {"type": "string", "description": "Memo substring filter (server-side)."},
                 "limit": {"type": "integer", "description": "Max alerts (default 50)."},
             },
             "required": ["camera"],

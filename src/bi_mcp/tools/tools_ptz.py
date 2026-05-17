@@ -32,8 +32,13 @@ def register() -> None:
         "bi_get_ptz_status",
         _tool_get_ptz_status,
         description=(
-            "PTZ current position, preset list, and lock state for one camera. "
-            "Camera must have PTZ enabled in BI."
+            "PTZ state for one camera. All fields BI returns are passed through "
+            "(presets[], presetnum, brightness, contrast, irmode, powermode, "
+            "talksamplerate). Adds two derived helpers: 'preset_map' = {N: "
+            "description, ...} keyed by preset number (UI3 source: presets[] is "
+            "1-indexed by position; \"(undefined)\" and empty descriptions are "
+            "dropped), and 'active_preset' = {num, description} when presetnum "
+            "is set. Camera must have PTZ enabled in BI."
         ),
         schema={
             "type": "object",

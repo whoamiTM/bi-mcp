@@ -56,7 +56,7 @@ For static facts (camera → IP, role, friendly name), do **not** call
 | `bi_get_clip_info`      | `clipstats`  |        |           | Forensic clip metadata                                         |
 | `bi_list_clips`         | `cliplist`   |        |           | Recorded clip inventory                                        |
 | `bi_get_timeline`       | `timeline`   |        |           | 24-hour activity timeline                                      |
-| `bi_get_ptz_status`     | `ptz` (query)|        |           | PTZ position + preset list                                     |
+| `bi_get_ptz_status`     | `ptz` (query)|        |           | PTZ state: raw `presets[]` + `presetnum` passthrough, plus derived `preset_map` {N→desc} and `active_preset` {num,description} |
 | `bi_list_log`           | `log`        |   ✓    |           | System log entries                                             |
 | `bi_get_reg`            | (file)       |        |           | .reg hive parse — for what the API can't reach                 |
 | `bi_get_actionset`      | (file)       |        |           | Semantic view of Alerts\\OnTrigger / OnReset (decoded)         |
@@ -86,6 +86,34 @@ bi_get_clip_info(path=<alerts[i].clip>)
 
 `alerts[].offset` is **milliseconds into the parent clip**, not a Unix
 timestamp. Don't ISO-format it.
+
+### Narrowing investigative queries with `view` + `search`
+
+Both `bi_list_alerts` and `bi_list_clips` accept server-side filters.
+Prefer them over fetching everything and filtering client-side — BI's
+database can handle the predicate faster, and you stay under the default
+limit of 50.
+
+```
+bi_list_alerts(camera="SecCam_3", view="cancelled", limit=10)
+    → only the cancelled-by-AI alerts (false positives)
+bi_list_alerts(camera="SecCam_3", view="people", search="UPS")
+    → person alerts whose memo contains "UPS"
+bi_list_clips(camera="SecCam_3", view="zoneb")
+    → alerts that fired in Zone B (returned as alert items inside a clip
+      response — see crossover note in the tool docstring)
+```
+
+Manual `view` values (per `§ alertlist` / `§ cliplist`): `all`, `new`,
+`stored`, `alerts`, `aux1..aux7`, `flagged`, `export`, `archive`,
+`people`, `vehicles`, `confirmed`, `canceled`. UI3 source adds:
+`zonea..zoneh`, `dio`, `onvif`, `audio`, `external`, `cancelled` (note
+the British spelling — BI accepts both).
+
+Crossover quirk: passing an alert-side view to `bi_list_clips` returns
+alert items (not clips); passing `flagged` to either returns mixed
+results. UI3 fixed a v91 bug in handling these mixed payloads — `msec`
+on a returned alert item is **alert length**, not clip length.
 
 ### The config inspection ladder
 
@@ -131,13 +159,45 @@ quoting values from a stale file.
 | `command`     | 2200-2299 (PTZ preset)                 | snapshot, profile change, /admin?, etc. (manual lists ~30 do-commands) |
 | `web_proto1`  | 2 (MQTT)                               | HTTP-GET / HTTP-POST / TCP            |
 | `profiles`    | full (bits 1-7 → profiles 1-7)         | —                                     |
-| `trig_zones`  | full (bits 0-7 → zones A-H)            | —                                     |
+| `trig_zones`  | full (bits 0-7 → zones A-G + Hotspot)  | —                                     |
 | `trig_source` | passed through raw (bits 1,2,3,7,14 observed) | full bit-position map (toggle each "Trigger sources" checkbox in UI) |
 
 Unmapped values fall through as `type: "unknown"` / `command_raw: <int>` /
 `protocol: "unknown"` — the original dict is always preserved under `raw`, so
 the tool never loses data. When adding a new mapping, edit the tables at the
 top of `shapers.shape_actionset` (`_ACTION_TYPE`, `_WEB_PROTO`, `_decode_command`).
+
+**Known field hint** (from ipcamtalk research, 2026-05-17): Sound actions
+store their audio file path under `Alerts\OnTrigger\<N>\soundPath`. When the
+Sound action's `type` integer is identified during Pass 2, that field is
+where the path lives.
+
+### Future extension: Watchdog action sets
+
+The `Cameras\<short>\Watchdog\OnLoss\<N>` and `\Watchdog\OnRestore\<N>`
+registry trees use the **same structure** as `Alerts\OnTrigger\<N>` — same
+action-entry shape, same `type`/`command`/filter fields. `bi_get_actionset`
+currently only reads the `Alerts\` tree. Extending it (or adding a sibling
+tool like `bi_get_watchdog_actionset`) would reuse `_shape_action_entry`
+unchanged. Not implemented yet; deferred until there's a concrete need.
+
+### Motion key off-by-one quirk
+
+Per jaydeel on ipcamtalk ("legacy reasons"): the `Cameras\<short>\Motion`
+registry subtree numbers profiles starting at the bare key, not at `\1`:
+
+| Registry path                | Actual profile |
+| ---------------------------- | -------------- |
+| `Cameras\<short>\Motion`     | profile **1**  |
+| `Cameras\<short>\Motion\1`   | profile **2**  |
+| `Cameras\<short>\Motion\2`   | profile **3**  |
+| ...                          | ...            |
+
+This affects `bi_get_reg(key_path="Motion\\<n>")` callers — `Motion\\3` is
+actually profile 4 in BI's UI, not profile 3. The `AI\` subtree appears to
+use straightforward 1-based numbering (`AI\\3` = profile 3); the off-by-one
+is specific to `Motion\`. If a future task involves cross-referencing motion
+zones against AI rules, this offset must be applied.
 
 ### What the BI JSON API does NOT expose (even with admin)
 

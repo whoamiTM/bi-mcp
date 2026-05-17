@@ -203,10 +203,57 @@ def shape_timeline(raw: Any) -> Any:
 
 
 def shape_ptz_status(raw: Any) -> Any:
-    """Shape the `ptz` query response — position + preset list."""
-    if isinstance(raw, dict):
-        return _drop_empty(raw)
-    return raw
+    """Shape the `ptz` query response — position + preset list.
+
+    Additive shaping: every field BI returns is preserved under its original
+    name. We add two derived fields alongside for ergonomics:
+
+    * ``preset_map`` → ``{"N": description, ...}`` map keyed by preset
+      number as a string, with empty / placeholder descriptions
+      ("", "(undefined)") dropped. Per UI3 source (ui3.js ~7160), the
+      original ``presets`` array is **1-indexed by position** and can be
+      either an array of strings (``presets[0]`` = preset 1's description)
+      or an array of ``{num, desc}`` objects.
+    * ``active_preset`` → ``{"num": presetnum, "description": "..."}``
+      when ``presetnum`` is set (>0) and resolvable from the preset map.
+
+    The original ``presetnum`` (int) and ``presets`` (array) fields are
+    left untouched so any caller that already reads them keeps working.
+    """
+    if not isinstance(raw, dict):
+        return raw
+
+    out: dict[str, Any] = dict(raw)
+
+    presets_in = raw.get("presets")
+    preset_map: dict[int, str] = {}
+    if isinstance(presets_in, list):
+        for i, entry in enumerate(presets_in):
+            if isinstance(entry, str):
+                desc, num = entry, i + 1
+            elif isinstance(entry, dict):
+                num = entry.get("num")
+                desc = entry.get("desc", "")
+                try:
+                    num = int(num) if num is not None else i + 1
+                except (TypeError, ValueError):
+                    num = i + 1
+            else:
+                continue
+            if desc in (None, "", "(undefined)"):
+                continue
+            preset_map[num] = desc
+    if preset_map:
+        out["preset_map"] = {str(k): v for k, v in sorted(preset_map.items())}
+
+    presetnum = raw.get("presetnum")
+    if isinstance(presetnum, int) and presetnum > 0:
+        active: dict[str, Any] = {"num": presetnum}
+        if presetnum in preset_map:
+            active["description"] = preset_map[presetnum]
+        out["active_preset"] = active
+
+    return _drop_empty(out)
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +405,10 @@ def _decode_bitmask(mask: int, labels: list[str]) -> list[str]:
 # profiles: bits 1-7 = profiles 1-7. Bit 0 is unused (or "inactive").
 _PROFILE_LABELS = ["inactive"] + [str(n) for n in range(1, 8)]
 
-# trig_zones: bits 0-7 = zones A-H.
+# trig_zones: bits 0-7 = zones A-H. Per UI3 source (ui3.js ~6114), zone H is
+# the "Hotspot" zone in the BI UI — labelled distinctly from regular zones
+# A-G. We keep the letter for stability and call out the Hotspot meaning
+# in the AGENTS.md decoder table.
 _ZONE_LABELS = list("ABCDEFGH")
 
 

@@ -43,10 +43,13 @@ def register() -> None:
             "Recent recorded clips for a camera: path, duration, resolution, flags, "
             "memo. Complementary to bi_list_alerts (clips include continuous "
             "recordings; alerts are AI/motion events). Requires 'camera' short name "
-            "(or 'Index' for all). Optional 'view' (one of: all, new, stored, alerts, "
-            "aux1-5, flagged, export, archive, confirmed, canceled), 'startdate'/"
-            "'enddate' (unix epoch), 'search' (memo text), 'tiles' (true=one entry "
-            "per day). 'limit' default 50."
+            "(or 'Index' for all). Optional 'view' (filter; see schema for full enum), "
+            "'startdate'/'enddate' (unix epoch), 'search' (memo substring, server-side), "
+            "'tiles' (true=one entry per day, useful for calendar views). 'limit' "
+            "default 50. Crossover note: alert-side view values (e.g. 'alerts', "
+            "'people', 'zonea') will return *alert* items in this response — they "
+            "have an 'msec' field meaning alert length (not clip length) and lack "
+            "the 'zones' field. UI3 v91 fixed a bug where this was mishandled."
         ),
         schema={
             "type": "object",
@@ -61,11 +64,15 @@ def register() -> None:
                 "view": {
                     "type": "string",
                     "description": (
-                        "Database view filter: all, new, stored, alerts, aux1-5, "
-                        "flagged, export, archive, confirmed, canceled."
+                        "Database view filter. Per BI manual § *cliplist*: 'all', "
+                        "'new', 'stored', 'alerts', 'aux1'..'aux5', 'flagged', 'export', "
+                        "'archive', 'confirmed', 'canceled'. Per UI3 source (extra "
+                        "alert-side values that work here, returning alert items): "
+                        "'people', 'vehicles', 'zonea'..'zoneh', 'dio', 'onvif', "
+                        "'audio', 'external', 'cancelled' (British)."
                     ),
                 },
-                "search": {"type": "string", "description": "Memo substring filter."},
+                "search": {"type": "string", "description": "Memo substring filter (server-side)."},
                 "tiles": {
                     "type": "boolean",
                     "description": "If true, return one entry per day instead of one per clip.",

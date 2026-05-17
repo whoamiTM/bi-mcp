@@ -64,7 +64,12 @@ def register() -> None:
                     "description": (
                         "Optional registry subkey path relative to the hive root, "
                         "e.g. 'AI\\\\3', 'Motion\\\\1', 'PTZ\\\\Presets', "
-                        "'camevents'. Omit to return the full hive."
+                        "'camevents'. Omit to return the full hive. "
+                        "Motion off-by-one quirk (per jaydeel on ipcamtalk, "
+                        "'legacy reasons'): 'Motion' (no number) = profile 1; "
+                        "'Motion\\\\1' = profile 2; 'Motion\\\\2' = profile 3; "
+                        "etc. AI\\\\<N> and PTZ\\\\Presets\\\\<N> use straight "
+                        "1:1 indexing, NOT this offset."
                     ),
                 },
             },
