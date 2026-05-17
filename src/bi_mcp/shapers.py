@@ -321,3 +321,178 @@ def shape_reg(parsed: dict[str, Any], camera_short: str, mtime_age_days: float) 
             "data": parsed,
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# action set decoding (Alerts\OnTrigger\N, Alerts\OnReset\N)
+# ---------------------------------------------------------------------------
+#
+# The decoder tables below were derived empirically from the user's 11-camera
+# install (Pass 1, 2026-05-17). Coverage is partial: only the action kinds the
+# user has configured are mapped. Unknown codes fall through to type="unknown"
+# with the raw integer preserved, so the tool degrades gracefully.
+
+# type codes (Alerts\OnTrigger\N\type). Only values observed in the wild are
+# mapped; the rest of the 14 BI action kinds (Sound, Push, Email, Run Program,
+# SMS, Phone, DIO, Popup, FTP, Shield, Schedule, Wait) need empirical mapping
+# via Pass 2 UI experimentation.
+_ACTION_TYPE: dict[int, str] = {
+    3: "web_or_mqtt",
+    12: "do_command",
+}
+
+# web_proto1 enum (Alerts\OnTrigger\N\web_proto1) for type=3 actions.
+# Only value 2 (MQTT) observed.
+_WEB_PROTO: dict[int, str] = {
+    2: "mqtt",
+}
+
+
+def _decode_bitmask(mask: int, labels: list[str]) -> list[str]:
+    """Decode a bitmask integer into a list of label strings."""
+    if not isinstance(mask, int):
+        return []
+    return [lbl for i, lbl in enumerate(labels) if mask & (1 << i)]
+
+
+# profiles: bits 1-7 = profiles 1-7. Bit 0 is unused (or "inactive").
+_PROFILE_LABELS = ["inactive"] + [str(n) for n in range(1, 8)]
+
+# trig_zones: bits 0-7 = zones A-H.
+_ZONE_LABELS = list("ABCDEFGH")
+
+
+def _decode_command(cmd: int) -> dict[str, Any]:
+    """Decode the `command` integer in a type=12 (Do Command) action.
+
+    Only the 2200+N "Call PTZ preset N" family is mapped (Pass 1 observation).
+    Other Do Command codes need empirical mapping via Pass 2.
+    """
+    if not isinstance(cmd, int):
+        return {"command_raw": cmd}
+    if 2200 <= cmd <= 2299:
+        return {"command": "ptz_preset", "preset": cmd - 2200}
+    return {"command_raw": cmd}
+
+
+def _shape_action_entry(idx: int, raw: dict[str, Any]) -> dict[str, Any]:
+    """Shape one Alerts\\OnTrigger\\N entry into a semantic action dict."""
+    t_int = raw.get("type")
+    kind = _ACTION_TYPE.get(t_int, "unknown")
+
+    out: dict[str, Any] = {
+        "index": idx,
+        "type": kind,
+        "enabled": bool(raw.get("enabled", 0)),
+        "description": raw.get("descript") or None,
+    }
+    if kind == "unknown":
+        out["type_raw"] = t_int
+
+    # filters block (common across all action types)
+    filters: dict[str, Any] = {}
+    if "profiles" in raw:
+        filters["profiles"] = _decode_bitmask(raw["profiles"], _PROFILE_LABELS)
+    if "trig_zones" in raw:
+        filters["zones"] = _decode_bitmask(raw["trig_zones"], _ZONE_LABELS)
+    if raw.get("trig_allzones"):
+        filters["zones_all_required"] = True
+    if raw.get("trig_object"):
+        # comma-separated, lowercase for stability (some entries use "Person")
+        filters["objects"] = [s.strip().lower() for s in str(raw["trig_object"]).split(",") if s.strip()]
+    if raw.get("trig_skip"):
+        filters["skip"] = raw["trig_skip"]
+    # trig_source bitmask is only partially decoded — pass through raw int.
+    if "trig_source" in raw:
+        filters["trig_source_raw"] = raw["trig_source"]
+    if filters:
+        out["filters"] = filters
+
+    # type-specific fields
+    if kind == "web_or_mqtt":
+        proto_int = raw.get("web_proto1")
+        out["protocol"] = _WEB_PROTO.get(proto_int, "unknown")
+        if out["protocol"] == "unknown" and proto_int is not None:
+            out["protocol_raw"] = proto_int
+        for src, dst in [
+            ("web_path", "path"),
+            ("web_params", "payload"),
+            ("web_headers", "headers"),
+            ("web_attempts", "attempts"),
+            ("web_timeout", "timeout_s"),
+        ]:
+            if raw.get(src) not in (None, "", 0):
+                out[dst] = raw[src]
+        if raw.get("mqtt_retain"):
+            out["mqtt_retain"] = True
+
+    elif kind == "do_command":
+        out.update(_decode_command(raw.get("command")))
+        if raw.get("args"):
+            out["args"] = raw["args"]
+        if raw.get("camname") and raw["camname"] != "(default)":
+            out["target_camera"] = raw["camname"]
+        if raw.get("remote"):
+            out["execute_on_remote"] = True
+
+    # always preserve raw for debugging / unmapped fields
+    out["raw"] = raw
+    return out
+
+
+def shape_actionset(
+    parsed: dict[str, Any],
+    camera_short: str,
+    mtime_age_days: float,
+    hook: str,
+) -> dict[str, Any]:
+    """Shape the Alerts hive into semantic on_trigger / on_reset action lists.
+
+    ``hook`` is "on_trigger", "on_reset", or "both" — controls which hook lists
+    are included in the output. ``parsed`` is the full Alerts subtree from
+    ``reg.parse_reg(short, key_path="Alerts")``.
+    """
+    def collect(hook_name: str) -> dict[str, Any] | None:
+        # OnTrigger / OnReset header key (e.g. {"enabled": 1, "count": 3})
+        header_key = f"Alerts\\{hook_name}"
+        header = parsed.get(header_key) or {}
+        # Numeric children
+        actions: list[dict[str, Any]] = []
+        prefix = f"Alerts\\{hook_name}\\"
+        for k, v in parsed.items():
+            if k.startswith(prefix):
+                tail = k[len(prefix):]
+                if tail.isdigit():
+                    actions.append(_shape_action_entry(int(tail), v))
+        if not actions and not header:
+            return None
+        actions.sort(key=lambda a: a["index"])
+        return {
+            "enabled": bool(header.get("enabled", 0)),
+            "declared_count": header.get("count"),
+            "actions": actions,
+        }
+
+    out: dict[str, Any] = {
+        "camera": camera_short,
+        "meta": {
+            "mtime_age_days": round(mtime_age_days, 2),
+            "stale": mtime_age_days > 7.0,
+            "decoder_coverage": "partial",
+            "decoder_note": (
+                "type codes 3 (web/mqtt) and 12 (do_command) are mapped; "
+                "command codes 2200-2299 (ptz_preset) are mapped; other "
+                "type/command values fall through as 'unknown' with raw "
+                "values preserved. See bi-mcp/AGENTS.md for the full table."
+            ),
+        },
+    }
+    if hook in ("on_trigger", "both"):
+        block = collect("OnTrigger")
+        if block is not None:
+            out["on_trigger"] = block
+    if hook in ("on_reset", "both"):
+        block = collect("OnReset")
+        if block is not None:
+            out["on_reset"] = block
+    return _drop_empty(out)

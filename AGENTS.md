@@ -59,6 +59,7 @@ For static facts (camera → IP, role, friendly name), do **not** call
 | `bi_get_ptz_status`     | `ptz` (query)|        |           | PTZ position + preset list                                     |
 | `bi_list_log`           | `log`        |   ✓    |           | System log entries                                             |
 | `bi_get_reg`            | (file)       |        |           | .reg hive parse — for what the API can't reach                 |
+| `bi_get_actionset`      | (file)       |        |           | Semantic view of Alerts\\OnTrigger / OnReset (decoded)         |
 | `bi_trigger_camera`     | `trigger`    |   ✓    |     ✓     | Fire a synthetic motion trigger                                |
 | `bi_set_ptz_preset`     | `ptz` (cmd)  |        |     ✓     | Recall a PTZ preset (1-20)                                     |
 | `bi_set_profile`        | `status` set |   ✓    |     ✓     | Switch active profile                                          |
@@ -107,12 +108,36 @@ bi_get_reg(camera="SecCam_3", key_path="camevents")
     → ONVIF event handler rules (Dahua IVS → BI trigger bindings)
 
 bi_get_reg(camera="SecCam_3", key_path="Alerts\\OnTrigger")
-    → action set definitions (email, webhook, preset call, etc.)
+    → action set definitions (raw — integer-coded fields)
+
+bi_get_actionset(camera="SecCam_3")          ← prefer this over the line above
+    → same data, but with type/command/protocol decoded to readable strings,
+      profiles/zones bitmasks expanded to lists, and the original dict kept
+      under raw[] for fields the decoder doesn't yet cover
 ```
 
-If a `.reg` file is older than 7 days, `bi_get_reg` returns
-`meta.stale: true`. Prompt the user to re-export the camera before quoting
-values from a stale file.
+If a `.reg` file is older than 7 days, `bi_get_reg` (and `bi_get_actionset`)
+return `meta.stale: true`. Prompt the user to re-export the camera before
+quoting values from a stale file.
+
+### Action-set decoder coverage
+
+`bi_get_actionset` decoder tables were built empirically from this install
+(Pass 1, 2026-05-17, 11 cameras, 28 action entries). Coverage is partial:
+
+| Field         | Mapped values                          | Pass 2 needed for                     |
+| ------------- | -------------------------------------- | ------------------------------------- |
+| `type`        | 3 (web_or_mqtt), 12 (do_command)       | Sound, Push, Email, SMS, Phone, Run Program, DIO, Popup, FTP, Shield, Schedule, Wait |
+| `command`     | 2200-2299 (PTZ preset)                 | snapshot, profile change, /admin?, etc. (manual lists ~30 do-commands) |
+| `web_proto1`  | 2 (MQTT)                               | HTTP-GET / HTTP-POST / TCP            |
+| `profiles`    | full (bits 1-7 → profiles 1-7)         | —                                     |
+| `trig_zones`  | full (bits 0-7 → zones A-H)            | —                                     |
+| `trig_source` | passed through raw (bits 1,2,3,7,14 observed) | full bit-position map (toggle each "Trigger sources" checkbox in UI) |
+
+Unmapped values fall through as `type: "unknown"` / `command_raw: <int>` /
+`protocol: "unknown"` — the original dict is always preserved under `raw`, so
+the tool never loses data. When adding a new mapping, edit the tables at the
+top of `shapers.shape_actionset` (`_ACTION_TYPE`, `_WEB_PROTO`, `_decode_command`).
 
 ### What the BI JSON API does NOT expose (even with admin)
 
