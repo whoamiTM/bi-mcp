@@ -207,3 +207,117 @@ def shape_ptz_status(raw: Any) -> Any:
     if isinstance(raw, dict):
         return _drop_empty(raw)
     return raw
+
+
+# ---------------------------------------------------------------------------
+# new shapers (Phase 1+2)
+# ---------------------------------------------------------------------------
+
+
+def shape_cliplist(raw: Any, limit: int = 50) -> list[dict[str, Any]]:
+    """Shape the `cliplist` response — array of clips.
+
+    Per manual § *cliplist*: each entry has ``camera``, ``path``, ``offset``
+    (ms inside parent clip — NOT a timestamp), ``clip`` (record id), ``date``
+    (UTC seconds), ``color``, ``flags`` (int bitmask: 2=flagged, 4=protected,
+    64=archive, 512=export), ``res`` (resolution string), etc. We ISO-ify the
+    ``date`` and ``utc`` epochs but leave ``offset`` numeric.
+    """
+    if not isinstance(raw, list):
+        return [{"raw": raw}]
+    out: list[dict[str, Any]] = []
+    for c in raw:
+        if not isinstance(c, dict):
+            continue
+        out.append(_drop_empty(_replace_ts(c, ("utc", "date"))))
+    return out[: max(0, int(limit))]
+
+
+def shape_sysconfig(raw: Any) -> dict[str, Any]:
+    """Shape the `sysconfig` response.
+
+    Per manual § *sysconfig*: read-side returns ``archive`` (bool, FTP backup
+    enable), ``schedule`` (bool, global-schedule use), ``manrecsec`` (manual
+    record time limit in seconds, 0=unlimited). BI builds may include additional
+    fields (MQTT state, DIO output state) inline. We drop empties; everything
+    else passes through.
+    """
+    if not isinstance(raw, dict):
+        return {"raw": raw}
+    return _drop_empty(raw)
+
+
+def shape_trigger_result(raw: Any) -> dict[str, Any]:
+    """Shape the `trigger` response envelope (not the alert that follows).
+
+    BI returns ``{result:"success"}`` on a fired trigger. We surface a
+    consistent ``{ok: True}`` so callers can check truthiness, and pass
+    through any ``data`` BI included.
+    """
+    if not isinstance(raw, dict):
+        return {"raw": raw, "ok": False}
+    ok = raw.get("result") == "success"
+    out: dict[str, Any] = {"ok": ok}
+    data = raw.get("data")
+    if data:
+        out["data"] = data
+    if not ok:
+        reason = (raw.get("data") or {}).get("reason") if isinstance(raw.get("data"), dict) else None
+        out["reason"] = reason or raw.get("result") or "unknown"
+    return out
+
+
+def shape_ptz_command_result(raw: Any) -> dict[str, Any]:
+    """Shape a `ptz` write-side response (e.g. preset recall).
+
+    Same envelope as `trigger`: ``{result:"success"}``. We surface ``{ok: True}``.
+    """
+    if not isinstance(raw, dict):
+        return {"raw": raw, "ok": False}
+    ok = raw.get("result") == "success"
+    out: dict[str, Any] = {"ok": ok}
+    if not ok:
+        data = raw.get("data")
+        reason = data.get("reason") if isinstance(data, dict) else None
+        out["reason"] = reason or raw.get("result") or "unknown"
+    return out
+
+
+def shape_profile_set_result(raw: Any, previous_profile: Any = None) -> dict[str, Any]:
+    """Shape the `status` (set-profile mode) response.
+
+    BI's ``status`` cmd returns the full status payload after the set; we
+    surface the new active profile + the prior profile so a caller can revert.
+    """
+    if not isinstance(raw, dict):
+        return {"raw": raw, "ok": False}
+    data = raw.get("data") if "data" in raw else raw
+    ok = raw.get("result") != "fail"
+    out: dict[str, Any] = {"ok": ok}
+    if isinstance(data, dict) and "profile" in data:
+        out["profile"] = data["profile"]
+    if previous_profile is not None:
+        out["previous_profile"] = previous_profile
+    if not ok:
+        reason = (data or {}).get("reason") if isinstance(data, dict) else None
+        out["reason"] = reason or "unknown"
+    return out
+
+
+def shape_reg(parsed: dict[str, Any], camera_short: str, mtime_age_days: float) -> dict[str, Any]:
+    """Shape the parsed .reg hive output.
+
+    ``parsed`` is the dict produced by ``reg.py::parse_reg`` (keyed by hive
+    subpath). We attach a top-level ``meta`` block with the camera name, the
+    file mtime age in days, and a ``stale`` flag for the warning path.
+    """
+    return _drop_empty(
+        {
+            "camera": camera_short,
+            "meta": {
+                "mtime_age_days": round(mtime_age_days, 2),
+                "stale": mtime_age_days > 7.0,
+            },
+            "data": parsed,
+        }
+    )

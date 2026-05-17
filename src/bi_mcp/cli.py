@@ -1,4 +1,4 @@
-"""Terminal CLI for bi-mcp — used for debugging without involving MCP.
+"""Terminal CLI for bi-mcp — debugging without involving MCP.
 
 Usage:
     bi-mcp-server check                       # verify connectivity + auth
@@ -20,7 +20,10 @@ from dotenv import load_dotenv
 from .client import from_env
 from .errors import BiError
 from .logging_setup import setup_logging
-from .tools import TOOLS, TOOL_DESCRIPTIONS
+
+# Note: `bi_mcp.tools` is imported lazily inside cli_main() after load_dotenv()
+# has run — auto-discovery reads BI_MCP_ALLOW_MUTATIONS at import time, so the
+# dotenv side-effects must land first.
 
 
 def _parse_kv_args(argv: list[str]) -> dict[str, Any]:
@@ -42,7 +45,7 @@ def _parse_kv_args(argv: list[str]) -> dict[str, Any]:
     return out
 
 
-def _print_help() -> None:
+def _print_help(tools_map: dict, descriptions: dict, mutations_on: bool) -> None:
     print("bi-mcp-server — Blue Iris MCP server / CLI")
     print()
     print("USAGE")
@@ -51,17 +54,24 @@ def _print_help() -> None:
     print("  bi-mcp-server <tool> [--key=value]  invoke a tool directly")
     print("  bi-mcp-server --list                list all available tools")
     print()
+    print(f"MUTATIONS: {'enabled' if mutations_on else 'disabled'} "
+          "(BI_MCP_ALLOW_MUTATIONS)")
+    print()
     print("TOOLS")
-    for name in sorted(TOOLS):
-        print(f"  {name:20}  {TOOL_DESCRIPTIONS.get(name, '')}")
+    for name in sorted(tools_map):
+        print(f"  {name:24}  {descriptions.get(name, '')[:72]}")
 
 
 def cli_main(argv: list[str]) -> int:
+    # load_dotenv MUST run before importing bi_mcp.tools — auto-discovery
+    # reads BI_MCP_ALLOW_MUTATIONS at import time.
     load_dotenv()
     setup_logging()
 
+    from .tools import TOOL_DESCRIPTIONS, TOOLS, mutations_enabled  # noqa: E402
+
     if not argv or argv[0] in ("-h", "--help", "help"):
-        _print_help()
+        _print_help(TOOLS, TOOL_DESCRIPTIONS, mutations_enabled())
         return 0
 
     if argv[0] == "--list":
@@ -76,10 +86,6 @@ def cli_main(argv: list[str]) -> int:
             version = data.get("version", "unknown")
             cams = client.call("camlist")
             ncams = len(cams) if isinstance(cams, list) else 0
-            # If admin creds are configured, validate them BEFORE printing the
-            # "OK" banner. Otherwise an operator (or a script greping stdout
-            # for OK) would see a misleading success line before the admin
-            # failure that exits 1.
             if client.admin is not None:
                 try:
                     admin_data = client.admin_login()
@@ -90,15 +96,12 @@ def cli_main(argv: list[str]) -> int:
                     )
                     print(f"hint: {e.hint}", file=sys.stderr)
                     return 1
-                # Auth succeeded, but BI lets non-admin users log in too — the
-                # login response carries an `admin` capability flag we can
-                # check directly. Without it, admin-gated cmds (log, etc.)
-                # will silently fail later.
                 if not admin_data.get("admin"):
                     print(
                         f"FAIL — user '{client.admin.user}' logged in, but Blue "
                         f"Iris reports admin=false for this user. Admin-gated "
-                        f"tools (bi_log, deep bi_camera_config) will not work.",
+                        f"tools (bi_list_log, deep bi_get_camera_config, "
+                        f"bi_get_sysconfig) will not work.",
                         file=sys.stderr,
                     )
                     print(
@@ -114,10 +117,12 @@ def cli_main(argv: list[str]) -> int:
                 admin_status = f"primary user '{client.read.user}' has admin"
             else:
                 admin_status = f"separate user '{client.admin.user}'"
+            mut_status = "enabled" if mutations_enabled() else "disabled"
             print(
                 f"OK — connected to Blue Iris {version} at "
                 f"{client.read.host}:{client.read.port} as '{client.read.user}', "
-                f"{ncams} cameras found; admin: {admin_status}"
+                f"{ncams} cameras found; admin: {admin_status}; mutations: {mut_status}; "
+                f"tools registered: {len(TOOLS)}"
             )
             return 0
         except BiError as e:

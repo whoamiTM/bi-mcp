@@ -1,11 +1,28 @@
-"""Typed exceptions for the Blue Iris MCP server.
+"""Typed exceptions + structured error envelopes for the Blue Iris MCP server.
 
-Each exception carries a ``kind`` (a stable string discriminator) and a ``hint``
-(a one-line human-readable remediation). The MCP layer turns these into
-structured ``{error, kind, hint}`` responses for Claude.
+Two layers:
+
+  * **Typed exceptions** (``BiError`` and subclasses): raised inside the dispatch
+    functions. Each carries a stable ``kind`` discriminator and a one-line
+    ``hint``. ``server.py`` converts them to JSON for Claude.
+
+  * **ErrorCode + create_error_response()**: structured codes and a
+    suggestion table modeled on ha-mcp's ``errors.py``. Used when a tool
+    wants to return a *non-exceptional* failure payload (e.g. a batch
+    item failed). New code should prefer raising typed exceptions; this
+    table exists so the canonical suggestions live in one place and stay
+    in sync between exceptions and explicit failure payloads.
 """
 
 from __future__ import annotations
+
+from enum import Enum
+from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Exceptions (existing surface, kept for back-compat)
+# ---------------------------------------------------------------------------
 
 
 class BiError(Exception):
@@ -40,9 +57,6 @@ class BiAuthFailed(BiError):
 
 
 class BiAdminAuthFailed(BiAuthFailed):
-    """Variant of BiAuthFailed for the optional admin user — points operators
-    at BI_ADMIN_USER/BI_ADMIN_PASS instead of the read-user creds."""
-
     kind = "admin_auth"
     hint = (
         "Blue Iris rejected the admin login. Check BI_ADMIN_USER and "
@@ -62,13 +76,177 @@ class BiBadRequest(BiError):
 
 
 class BiAdminRequired(BiError):
-    """The requested cmd is gated behind admin BI credentials, but the server
-    is configured with only the read-only user. Distinct from BiAuthFailed
-    (which is "I tried to log in and BI said no") and from a generic BiError
-    "Access denied" (which is BI's own wording mid-session)."""
-
     kind = "admin_required"
     hint = (
         "This tool requires admin Blue Iris credentials. Set BI_ADMIN_USER "
         "and BI_ADMIN_PASS in bi-mcp/.env to a BI user with admin enabled."
     )
+
+
+class BiMutationsDisabled(BiError):
+    """A mutating tool was invoked while ``BI_MCP_ALLOW_MUTATIONS`` is unset.
+
+    In practice the registry will skip mutation modules entirely when the flag
+    is off, so this should never surface — but it exists as a defensive guard
+    in case a caller bypasses the registry (e.g. direct CLI use of a tool
+    function).
+    """
+
+    kind = "mutations_disabled"
+    hint = (
+        "Mutating tools (bi_trigger_camera, bi_set_ptz_preset, bi_set_profile) "
+        "are disabled by default. Set BI_MCP_ALLOW_MUTATIONS=1 in bi-mcp/.env "
+        "to enable them. Read AGENTS.md § Mutation patterns first."
+    )
+
+
+class BiStaleReg(BiError):
+    """A .reg file used by bi_get_reg is older than the staleness threshold.
+
+    Surfaced as a *warning* in the tool's normal response shape (not raised)
+    in the common case. The exception variant exists for callers that want
+    to treat staleness as a hard failure.
+    """
+
+    kind = "stale_reg"
+    hint = (
+        "The .reg export under bi-mcp's cam settings/ is older than the "
+        "freshness threshold. Re-export the camera (right-click camera in "
+        "Blue Iris → Camera settings → Copy/import → Export) before quoting "
+        "values from it."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Structured error codes (ha-mcp pattern, adapted)
+# ---------------------------------------------------------------------------
+
+
+class ErrorCode(str, Enum):
+    """Stable string codes for structured error responses.
+
+    These overlap deliberately with ``BiError.kind`` so a code can be derived
+    from any raised exception. Adding a new code? Update
+    ``DEFAULT_SUGGESTIONS`` below in the same change.
+    """
+
+    # Connection / auth
+    BI_UNREACHABLE = "BI_UNREACHABLE"
+    AUTH_EXPIRED = "AUTH_EXPIRED"
+    AUTH_FAILED = "AUTH_FAILED"
+    ADMIN_REQUIRED = "ADMIN_REQUIRED"
+    ADMIN_AUTH_FAILED = "ADMIN_AUTH_FAILED"
+
+    # Resource lookup
+    CAMERA_NOT_FOUND = "CAMERA_NOT_FOUND"
+    ALERT_NOT_FOUND = "ALERT_NOT_FOUND"
+    CLIP_NOT_FOUND = "CLIP_NOT_FOUND"
+
+    # Request shape
+    VALIDATION_FAILED = "VALIDATION_FAILED"
+
+    # Mutation gating
+    MUTATIONS_DISABLED = "MUTATIONS_DISABLED"
+
+    # PTZ / mutation outcomes
+    PTZ_FAILED = "PTZ_FAILED"
+    TRIGGER_FAILED = "TRIGGER_FAILED"
+    PROFILE_SET_FAILED = "PROFILE_SET_FAILED"
+
+    # .reg parsing
+    STALE_REG = "STALE_REG"
+    REG_PARSE_FAILED = "REG_PARSE_FAILED"
+
+    # Catch-all
+    BI_ERROR = "BI_ERROR"
+
+
+DEFAULT_SUGGESTIONS: dict[ErrorCode, str] = {
+    ErrorCode.BI_UNREACHABLE: (
+        "Check BI_HOST/BI_PORT in .env and confirm Blue Iris's web server is enabled "
+        "(Settings → Web server)."
+    ),
+    ErrorCode.AUTH_EXPIRED: "Re-run the tool — the client will re-login automatically.",
+    ErrorCode.AUTH_FAILED: (
+        "Check BI_USER/BI_PASS in .env. Blue Iris locks accounts after repeated failed logins."
+    ),
+    ErrorCode.ADMIN_REQUIRED: (
+        "Set BI_ADMIN_USER/BI_ADMIN_PASS in bi-mcp/.env to a BI user with admin enabled."
+    ),
+    ErrorCode.ADMIN_AUTH_FAILED: (
+        "Check BI_ADMIN_USER/BI_ADMIN_PASS in .env. Blue Iris locks accounts after repeated "
+        "failed logins."
+    ),
+    ErrorCode.CAMERA_NOT_FOUND: (
+        "Call bi_list_cameras to confirm the short name. Camera short names are case-sensitive."
+    ),
+    ErrorCode.ALERT_NOT_FOUND: "Call bi_list_alerts and use a 'path' from the returned array.",
+    ErrorCode.CLIP_NOT_FOUND: "Call bi_list_alerts and use a 'clip' path from the returned array.",
+    ErrorCode.VALIDATION_FAILED: (
+        "Check the tool's documented parameters in AGENTS.md § Tool inventory."
+    ),
+    ErrorCode.MUTATIONS_DISABLED: (
+        "Set BI_MCP_ALLOW_MUTATIONS=1 in bi-mcp/.env to enable mutating tools. "
+        "Read AGENTS.md § Mutation patterns first."
+    ),
+    ErrorCode.PTZ_FAILED: (
+        "Confirm the preset number exists via bi_get_ptz_status, and that the camera "
+        "has PTZ enabled in Blue Iris."
+    ),
+    ErrorCode.TRIGGER_FAILED: (
+        "Confirm the camera short name with bi_list_cameras. BI may reject the trigger "
+        "if the camera is disabled or offline."
+    ),
+    ErrorCode.PROFILE_SET_FAILED: (
+        "Confirm the profile name/index against bi_get_session profiles[]. Profile names "
+        "are case-sensitive."
+    ),
+    ErrorCode.STALE_REG: (
+        "Re-export the camera: right-click in Blue Iris → Camera settings → Copy/import → "
+        "Export, save into bi-mcp/cam settings/."
+    ),
+    ErrorCode.REG_PARSE_FAILED: (
+        "The .reg file may be corrupt or in the wrong format. Re-export it from Blue Iris."
+    ),
+    ErrorCode.BI_ERROR: "Check Blue Iris's Status → Messages window for details.",
+}
+
+
+def create_error_response(
+    code: ErrorCode,
+    message: str,
+    suggestion: str | None = None,
+    **context: Any,
+) -> dict[str, Any]:
+    """Build a structured ``{success:False, error:{...}, ...}`` payload.
+
+    ``suggestion`` defaults to the entry in ``DEFAULT_SUGGESTIONS`` for the code.
+    Extra ``context`` kwargs are merged into the top level.
+    """
+    return {
+        "success": False,
+        "error": {
+            "code": code.value,
+            "message": message,
+            "suggestion": suggestion or DEFAULT_SUGGESTIONS.get(code, ""),
+        },
+        **context,
+    }
+
+
+_KIND_TO_CODE: dict[str, ErrorCode] = {
+    "unreachable": ErrorCode.BI_UNREACHABLE,
+    "auth": ErrorCode.AUTH_FAILED,
+    "admin_auth": ErrorCode.ADMIN_AUTH_FAILED,
+    "admin_required": ErrorCode.ADMIN_REQUIRED,
+    "not_found": ErrorCode.CAMERA_NOT_FOUND,
+    "bad_request": ErrorCode.VALIDATION_FAILED,
+    "mutations_disabled": ErrorCode.MUTATIONS_DISABLED,
+    "stale_reg": ErrorCode.STALE_REG,
+    "bi_error": ErrorCode.BI_ERROR,
+}
+
+
+def code_from_exception(exc: BiError) -> ErrorCode:
+    """Map a raised BiError to its ErrorCode counterpart."""
+    return _KIND_TO_CODE.get(exc.kind, ErrorCode.BI_ERROR)

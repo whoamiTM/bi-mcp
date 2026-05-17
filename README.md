@@ -1,12 +1,20 @@
 # bi-mcp — Blue Iris MCP Server
 
 A small Python [Model Context Protocol](https://modelcontextprotocol.io) server
-that lets Claude (or any MCP client) inspect a running Blue Iris NVR install in
-real time. You describe an issue; Claude calls the tools it needs (`bi_status`,
-`bi_camera_config`, `bi_alerts`, `bi_log`, …) and tells you what to change,
-citing the Blue Iris manual.
+that lets Claude (or any MCP client) inspect — and optionally drive — a running
+Blue Iris NVR install in real time. You describe an issue; Claude calls the
+tools it needs (`bi_get_status`, `bi_get_camera_config`, `bi_list_alerts`,
+`bi_list_log`, `bi_get_reg`, …) and tells you what to change, citing the Blue
+Iris manual.
 
-10 read-only tools, ~700 LoC of Python, MIT-licensed.
+**13 read-only tools** by default, plus **3 mutating tools**
+(`bi_trigger_camera`, `bi_set_ptz_preset`, `bi_set_profile`) that register only
+when `BI_MCP_ALLOW_MUTATIONS=1`. MIT-licensed.
+
+For agents (LLMs working through this server): read [AGENTS.md](AGENTS.md) —
+that's the canonical operating manual with tool routing, mutation safety
+rules, and the gap between what the BI JSON API exposes and what the `.reg`
+parser is for.
 
 ---
 
@@ -103,8 +111,8 @@ Three smoke tests, in order of increasing involvement:
 
 2. **CLI tool call**
    ```bash
-   bi-mcp-server bi_cameras
-   bi-mcp-server bi_camera_config short=SecCam_3
+   bi-mcp-server bi_list_cameras
+   bi-mcp-server bi_get_camera_config short=SecCam_3
    ```
    You should see shaped JSON for your cameras.
 
@@ -118,23 +126,92 @@ Three smoke tests, in order of increasing involvement:
 If steps 1–3 pass, the server is good. Connect Claude Code and ask it about
 your cameras.
 
+## Breaking change: tool rename (v0.2.0)
+
+The 10 read tools shipped in v0.1.0 were renamed to a consistent
+`bi_<verb>_<noun>` convention in v0.2.0. **No aliases are kept** — old
+callers will see `unknown tool` errors. Update any saved prompts, MCP
+client tool-name caches, or shell scripts accordingly:
+
+| Old name (v0.1.0)    | New name (v0.2.0)        |
+|----------------------|--------------------------|
+| `bi_status`          | `bi_get_status`          |
+| `bi_session_info`    | `bi_get_session`         |
+| `bi_cameras`         | `bi_list_cameras`        |
+| `bi_camera_config`   | `bi_get_camera_config`   |
+| `bi_log`             | `bi_list_log`            |
+| `bi_alerts`          | `bi_list_alerts`         |
+| `bi_alert_tracks`    | `bi_get_alert_tracks`    |
+| `bi_clip_info`       | `bi_get_clip_info`       |
+| `bi_timeline`        | `bi_get_timeline`        |
+| `bi_ptz_status`      | `bi_get_ptz_status`      |
+
+The rename is deliberate — naming consistency across the now-16-tool surface
+matters more than one-time backward compatibility for a pre-1.0 server. If
+that tradeoff doesn't work for your install, stay on v0.1.0.
+
 ## Tool reference
 
-All tools are **read-only**. Pass `raw=true` on any tool to get the unshaped
-Blue Iris JSON instead of the trimmed view.
+13 read tools register by default. `bi_trigger_camera`, `bi_set_ptz_preset`,
+and `bi_set_profile` register only when `BI_MCP_ALLOW_MUTATIONS=1`. Pass
+`raw=true` on any tool to get the unshaped Blue Iris JSON.
 
-| Tool | Backing BI cmd | Purpose |
-|---|---|---|
-| `bi_status` | `status` | Active profile, schedule, CPU/RAM/disk, uptime, DIO, warnings. |
-| `bi_session_info` | `login` data | BI version, license, time zone, current user's capabilities, available profile/schedule/stream names. |
-| `bi_cameras` | `camlist` | All cameras and groups: online state, trigger counts, stream health, last alert. |
-| `bi_camera_config` | `camlist` filtered | Full config + current state for one camera by short name. |
-| `bi_log` | `log` | Recent system log entries. Params: `level`, `limit`. **Requires admin** — see Security note. |
-| `bi_alerts` | `alertlist` | Recent alerts with AI memo, object/confidence, zones, clip path. Params: `camera`, `startdate`, `enddate`, `limit`. |
-| `bi_alert_tracks` | `tracks` | AI per-frame bounding boxes inside one alert. Param: `path`. |
-| `bi_clip_info` | `clipstats` | Forensic detail for one clip: resolution, duration, profile/schedule/zones at trigger. Param: `path`. |
-| `bi_timeline` | `timeline` | 24-hour activity buckets for a camera. Params: `camera`, `startdate`, `enddate`. |
-| `bi_ptz_status` | `ptz` (query) | Current PTZ position, preset list, lock state. Param: `camera`. |
+For the canonical reference with routing tables, error taxonomy, and
+mutation-safety rules, see [AGENTS.md](AGENTS.md).
+
+| Tool | Backing BI cmd | Admin? | Mutating? | Purpose |
+|---|---|:--:|:--:|---|
+| `bi_get_status` | `status` | | | Active profile, schedule, CPU/RAM/disk, uptime, DIO, warnings. |
+| `bi_get_session` | `login` data | | | BI version/capabilities, available profiles/schedules/streams. |
+| `bi_get_sysconfig` | `sysconfig` | ✓ | | Archive/schedule/manrecsec + any DIO/MQTT inline. |
+| `bi_list_cameras` | `camlist` | | | All cameras and groups: online state, trigger counts, stream health. |
+| `bi_get_camera_config` | `camconfig`/`camlist` | (deep) | | Per-camera config (deep w/ admin, shallow w/o). |
+| `bi_list_alerts` | `alertlist` | | | Recent alerts with AI memo, classification, zones, clip path. |
+| `bi_get_alert_tracks` | `tracks` | | | AI per-frame bounding boxes inside one alert. |
+| `bi_get_clip_info` | `clipstats` | | | Forensic detail for one clip. |
+| `bi_list_clips` | `cliplist` | | | Recorded clip inventory; complementary to `bi_list_alerts`. |
+| `bi_get_timeline` | `timeline` | | | 24-hour activity buckets for a camera. |
+| `bi_get_ptz_status` | `ptz` (query) | | | Current PTZ position, preset list, lock state. |
+| `bi_list_log` | `log` | ✓ | | Recent BI system log entries. |
+| `bi_get_reg` | (file parser) | | | Parse `.reg` camera export — trigger zones, AI thresholds, per-preset flags. |
+| `bi_trigger_camera` | `trigger` | | ✓ | Fire a synthetic motion trigger (mutations flag). |
+| `bi_set_ptz_preset` | `ptz` (cmd) | | ✓ | Recall a PTZ preset 1-20 (mutations flag). |
+| `bi_set_profile` | `status` (set) | | ✓ | Switch active profile (mutations flag). |
+
+### Enabling mutating tools
+
+Set `BI_MCP_ALLOW_MUTATIONS=1` in `.env` (or in the MCP config `env` block).
+With the flag off, the mutating tools are not registered at all — the MCP
+tool list stays clean. Read [AGENTS.md § Mutation patterns](AGENTS.md) before
+flipping the flag.
+
+### `bi_get_reg` and the `.reg` parser
+
+`bi_get_reg` parses Blue Iris's binary `.reg` camera exports to surface
+settings the JSON API doesn't expose (trigger zone polygons, per-class AI
+confidence thresholds, per-preset alert-skip flags, ONVIF event handlers,
+alert action definitions). It expects:
+
+- A `.reg-venv/` directory in the launch CWD with `python-registry` installed,
+  OR `BI_MCP_REG_VENV_PYTHON` pointing at any Python interpreter that has it.
+  The default probe is platform-aware: on POSIX it looks for
+  `.reg-venv/bin/python3`, on Windows for `.reg-venv\Scripts\python.exe`.
+- A `cam settings/` directory in the launch CWD with `<short>.reg` exports,
+  OR `BI_MCP_REG_DIR` pointing at the directory.
+
+To create the venv:
+- POSIX: `python3 -m venv .reg-venv && .reg-venv/bin/pip install python-registry`
+- Windows: `python -m venv .reg-venv && .reg-venv\Scripts\pip install python-registry`
+
+Both defaults resolve relative to the current working directory at call time,
+not the install location — so they work correctly whether bi-mcp is run from
+an editable checkout, a wheel, or via `uvx`. Camera short names are validated
+(`[A-Za-z0-9_-]+`) before being composed into a path, so a malformed name
+can't escape the configured directory.
+
+Re-export a camera from BI any time you tune settings (right-click camera →
+Camera settings → Copy/import → Export). Files older than 7 days trigger a
+staleness warning in the tool's response.
 
 ## Troubleshooting
 
@@ -149,7 +226,7 @@ Blue Iris JSON instead of the trimmed view.
 - **Don't keep retrying with wrong creds** — Blue Iris will lock the account.
 
 **`not_found`** — Requested camera/clip/alert doesn't exist.
-- For `bi_camera_config short=…`: the value must match a camera's *short name*, not its display name. Run `bi_cameras` to see the list.
+- For `bi_get_camera_config short=…`: the value must match a camera's *short name*, not its display name. Run `bi_list_cameras` to see the list.
 
 **Empty / weird responses** — pass `raw=true` to see what BI actually returned, then file an issue with the raw JSON so the shaper can be improved.
 
@@ -181,14 +258,20 @@ MCP client at a time. It should not be exposed to the internet.
 `.env` is gitignored. Never commit it. If you commit credentials by accident,
 delete the user in Blue Iris immediately and create a new one.
 
-### Why `bi_log` returns "Access denied" for the recommended user
+### Why `bi_list_log` / `bi_get_sysconfig` need admin
 
-Blue Iris gates the `log` JSON command behind admin. The non-admin user above
-will see an `Access denied` error when calling `bi_log`. This is intentional:
-the read-only contract of this server is more valuable than one tool. If you
-genuinely need log access during diagnosis, paste the relevant log lines from
-BI's Status window manually — or grant the MCP user admin and accept the
-larger blast radius if `.env` ever leaks.
+Blue Iris gates the `log` and `sysconfig` JSON cmds behind admin, as does the
+deep (camconfig) path of `bi_get_camera_config`. The recommended pattern is a
+**two-user setup**:
+
+- `BI_USER` / `BI_PASS` — low-privilege account (PTZ + Clips), used for all
+  read tools that don't need admin.
+- `BI_ADMIN_USER` / `BI_ADMIN_PASS` — a dedicated admin account, used only
+  for the admin-gated cmds.
+
+If only the read user is configured, admin-gated tools degrade gracefully
+(deep `bi_get_camera_config` falls back to the shallow `camlist` view;
+`bi_list_log` and `bi_get_sysconfig` raise a clear `admin_required` error).
 
 ## License
 
