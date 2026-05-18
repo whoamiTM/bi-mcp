@@ -379,13 +379,24 @@ def shape_reg(parsed: dict[str, Any], camera_short: str, mtime_age_days: float) 
 # user has configured are mapped. Unknown codes fall through to type="unknown"
 # with the raw integer preserved, so the tool degrades gracefully.
 
-# type codes (Alerts\OnTrigger\N\type). Only values observed in the wild are
-# mapped; the rest of the 14 BI action kinds (Sound, Push, Email, Run Program,
-# SMS, Phone, DIO, Popup, FTP, Shield, Schedule, Wait) need empirical mapping
-# via Pass 2 UI experimentation.
+# type codes (Alerts\OnTrigger\N\type). Full 0-13 map confirmed by user
+# 2026-05-17. The kind labels are known; per-type payload field names beyond
+# type=3 (web/mqtt) and type=12 (do_command) still need Pass 2 mapping.
 _ACTION_TYPE: dict[int, str] = {
-    3: "web_or_mqtt",
+    0: "sound",
+    1: "push",
+    2: "run",
+    3: "web_or_mqtt",  # disambiguated via web_proto1
+    4: "email",
+    5: "sms",
+    6: "phone",
+    7: "dio",
+    8: "toast",
+    9: "ftp",
+    10: "shield",
+    11: "schedule",
     12: "do_command",
+    13: "wait",
 }
 
 # web_proto1 enum (Alerts\OnTrigger\N\web_proto1) for type=3 actions.
@@ -530,10 +541,12 @@ def shape_actionset(
             "stale": mtime_age_days > 7.0,
             "decoder_coverage": "partial",
             "decoder_note": (
-                "type codes 3 (web/mqtt) and 12 (do_command) are mapped; "
-                "command codes 2200-2299 (ptz_preset) are mapped; other "
-                "type/command values fall through as 'unknown' with raw "
-                "values preserved. See bi-mcp/AGENTS.md for the full table."
+                "all 14 type codes (0-13) are labeled (sound/push/run/web/"
+                "email/sms/phone/dio/toast/ftp/shield/schedule/do_command/"
+                "wait). Payload-field decoding is complete for type=3 (web/"
+                "mqtt via web_proto1) and type=12 (do_command, command "
+                "2200-2299 = ptz_preset); other types pass raw payload "
+                "fields through. See bi-mcp/AGENTS.md for the full table."
             ),
         },
     }

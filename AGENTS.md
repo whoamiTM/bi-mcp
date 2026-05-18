@@ -151,11 +151,13 @@ quoting values from a stale file.
 ### Action-set decoder coverage
 
 `bi_get_actionset` decoder tables were built empirically from this install
-(Pass 1, 2026-05-17, 11 cameras, 28 action entries). Coverage is partial:
+(Pass 1, 2026-05-17, 11 cameras, 28 action entries). The full `type` map was
+later filled in by the user (2026-05-17). Remaining gaps are in payload-field
+decoding for kinds the install doesn't use:
 
 | Field         | Mapped values                          | Pass 2 needed for                     |
 | ------------- | -------------------------------------- | ------------------------------------- |
-| `type`        | 3 (web_or_mqtt), 12 (do_command)       | Sound, Push, Email, SMS, Phone, Run Program, DIO, Popup, FTP, Shield, Schedule, Wait |
+| `type`        | **0-13 full map**: 0=sound, 1=push, 2=run, 3=web, 4=email, 5=sms, 6=phone, 7=dio, 8=toast, 9=ftp, 10=shield, 11=schedule, 12=do_command, 13=wait | — (kind labels complete; per-type payload fields below still partial) |
 | `command`     | 2200-2299 (PTZ preset)                 | snapshot, profile change, /admin?, etc. (manual lists ~30 do-commands) |
 | `web_proto1`  | 2 (MQTT)                               | HTTP-GET / HTTP-POST / TCP            |
 | `profiles`    | full (bits 1-7 → profiles 1-7)         | —                                     |
