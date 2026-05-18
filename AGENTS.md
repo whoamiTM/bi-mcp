@@ -14,7 +14,7 @@ here. Read this first when entering a fresh session.
 - **Tested against:** Blue Iris **5.9.9.71** (x64) on Windows 10.
 - **Mode:** stdio MCP server. Read-only by default; mutating tools register
   only when `BI_MCP_ALLOW_MUTATIONS=1`.
-- **Surface:** 13 read tools (always) + 3 mutating tools (when enabled).
+- **Surface:** 14 read tools (always) + 4 mutating tools (when enabled).
 
 ---
 
@@ -34,6 +34,7 @@ here. Read this first when entering a fresh session.
 | "Fire a test alert on camera X" (requires mutations)                     | `bi_trigger_camera(camera="...", memo="...")`            |
 | "Move PTZ to preset N" (requires mutations)                              | `bi_get_ptz_status` first → `bi_set_ptz_preset(...)`     |
 | "Change to night profile" (requires mutations)                           | `bi_get_status` first → `bi_set_profile(...)` → revert   |
+| "Export an MP4 of this alert / clip" (requires mutations + `clipcreate`) | `bi_export_clip(mode="create", path=…, startms=…)` → poll w/ `mode="status"` |
 
 For static facts (camera → IP, role, friendly name), do **not** call
 `bi_list_cameras` — those are cached in user-level memory at
@@ -63,6 +64,7 @@ For static facts (camera → IP, role, friendly name), do **not** call
 | `bi_trigger_camera`     | `trigger`    |   ✓    |     ✓     | Fire a synthetic motion trigger                                |
 | `bi_set_ptz_preset`     | `ptz` (cmd)  |        |     ✓     | Recall a PTZ preset (1-20)                                     |
 | `bi_set_profile`        | `status` set |   ✓    |     ✓     | Switch active profile                                          |
+| `bi_export_clip`        | `export`     |   ✓    |     ✓     | Async MP4/AVI/WMV export from a clip range (modes: create / status / list). Requires BI user `clipcreate=true` |
 
 Every tool accepts `raw=true` — returns the underlying BI payload verbatim
 instead of the shaped view. Use it when shaping might be hiding a field
@@ -289,6 +291,60 @@ If the user asks for something destructive that's beyond mutation —
 e.g. "delete all alerts from yesterday" — the answer is that bi-mcp
 deliberately doesn't expose `delalert`/`delclip`/`moveclip`. Point them
 at the BI UI.
+
+### Rule 6.5 — `bi_export_clip` lifecycle ends outside the export queue
+
+Verified live 2026-05-18: a small (5s) export completes in <8s on this
+install. Once BI marks the job `done`, the export record **graduates out
+of the export-queue namespace** into the regular clip database. Symptoms:
+
+  * `bi_export_clip mode="status" path=@<new_record>` starts returning
+    `{'status': 'Clip not BVR'}` from BI (it's an MP4 now, not a queue
+    entry).
+  * `bi_export_clip mode="list"` no longer lists it.
+  * `bi_get_clip_info path=@<new_record>` returns the produced MP4 with
+    its real filesize, duration, and filetype like `mp4 H264 New.Clipboard`.
+
+The right polling pattern:
+
+```
+create_resp = bi_export_clip(mode="create", ...)
+new_record  = create_resp["item"]["path"]
+loop:
+    s = bi_export_clip(mode="status", path=new_record)
+    if not s["ok"]:           # BI errored OR the record graduated
+        break
+    if s["item"]["status"] in ("done", "error"):
+        break
+    sleep / re-poll
+# Whether the loop broke on error or done, verify by clip-info:
+clip = bi_get_clip_info(path=new_record)
+# clip.filesize tells you the export actually landed
+```
+
+Don't treat "status returned a BI error" as failure on its own — also
+check `bi_get_clip_info`. The export probably succeeded.
+
+**`raw=true` nuance**: passing `raw=true` on `mode="status"` returns the
+verbatim BI payload, which means the graduation case **re-raises** the
+underlying `BiError` instead of synthesizing the `{ok:false}` envelope.
+The shaped path (default) is the ergonomic one; `raw=true` exists for
+debugging the wire protocol and must show what BI actually returned —
+which, post-graduation, is an error. If you want a clean ok/false signal,
+don't pass `raw=true`.
+
+### Rule 6 — `bi_export_clip` needs the `clipcreate` user permission
+
+The BI `export` cmd is gated on the per-user **`clipcreate`** capability
+(manual § *login* reply table: "may take snapshots, start manual recording,
+export/convert clips"), **not on the admin flag**. A user can have
+`admin=true` and still get BI's `Access denied` here. Check
+`bi_get_session()["clipcreate"]` before calling; if false, point the user
+at BI → Settings → Users → \<the user\> → enable **"Create clips"**
+(manual § 6605: the Create clips privilege gates "snapshots, manual video
+recordings, or to crop and export video"). This applies to whichever
+account `bi_export_clip` routes through (it goes admin-side, so that's
+`BI_ADMIN_USER` if explicit-admin is configured, otherwise `BI_USER`).
 
 ---
 

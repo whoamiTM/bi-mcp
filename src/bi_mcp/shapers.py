@@ -351,6 +351,60 @@ def shape_profile_set_result(raw: Any, previous_profile: Any = None) -> dict[str
     return out
 
 
+def _shape_export_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Shape one export-queue entry.
+
+    BI returns per-item fields (manual § *export* reply table): ``path``,
+    ``status`` (queued/active/error/done), ``msec``, ``progress`` (0-100 when
+    active), ``uri`` (relative to the New folder; full URL is /clips/{uri}),
+    ``utc`` (source clip start, epoch seconds), ``error`` (when status=error),
+    ``filesize`` (formatted when status=done). The manual spells the size
+    field with a typo (``lesize``) in the docs table; we tolerate both names.
+    """
+    if not isinstance(item, dict):
+        return {"raw": item}
+    out = dict(item)
+    if "utc" in out:
+        iso = _iso(out["utc"])
+        if iso is not None:
+            out["utc"] = iso
+    # Manual table prints "lesize" (a documentation typo from "filesize");
+    # real BI builds return "filesize". Normalize either way.
+    if "lesize" in out and "filesize" not in out:
+        out["filesize"] = out.pop("lesize")
+    return _drop_empty(out)
+
+
+def shape_export_result(raw: Any) -> dict[str, Any]:
+    """Shape the `export` cmd reply.
+
+    Three reply shapes from one cmd (manual § *export*):
+
+      * **create / single-status** — a single export-item dict with
+        ``path``, ``status``, etc. Returned wrapped in BI's standard
+        ``{result, data}`` envelope.
+      * **queue list** (no ``path`` sent) — an array of export-item dicts
+        under ``data``.
+      * **failure** — ``{result: "fail", data: {reason: "..."}}``.
+
+    We surface ``ok`` plus either ``item`` (single) or ``items`` (list).
+    """
+    if not isinstance(raw, dict):
+        return {"raw": raw, "ok": False}
+    ok = raw.get("result") != "fail"
+    out: dict[str, Any] = {"ok": ok}
+    data = raw.get("data") if "data" in raw else raw
+    if not ok:
+        reason = data.get("reason") if isinstance(data, dict) else None
+        out["reason"] = reason or raw.get("result") or "unknown"
+        return out
+    if isinstance(data, list):
+        out["items"] = [_shape_export_item(it) for it in data if isinstance(it, dict)]
+    elif isinstance(data, dict):
+        out["item"] = _shape_export_item(data)
+    return out
+
+
 def shape_reg(parsed: dict[str, Any], camera_short: str, mtime_age_days: float) -> dict[str, Any]:
     """Shape the parsed .reg hive output.
 
