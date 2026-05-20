@@ -94,9 +94,10 @@ class BiMutationsDisabled(BiError):
 
     kind = "mutations_disabled"
     hint = (
-        "Mutating tools (bi_trigger_camera, bi_set_ptz_preset, bi_set_profile) "
-        "are disabled by default. Set BI_MCP_ALLOW_MUTATIONS=1 in bi-mcp/.env "
-        "to enable them. Read AGENTS.md § Mutation patterns first."
+        "Mutating tools (bi_trigger_camera, bi_set_ptz_preset, bi_set_profile, "
+        "bi_export_clip, bi_update_record) are disabled by default. Set "
+        "BI_MCP_ALLOW_MUTATIONS=1 in bi-mcp/.env to enable them. Read "
+        "AGENTS.md § Mutation patterns first."
     )
 
 

@@ -65,6 +65,7 @@ For static facts (camera → IP, role, friendly name), do **not** call
 | `bi_set_ptz_preset`     | `ptz` (cmd)  |        |     ✓     | Recall a PTZ preset (1-20)                                     |
 | `bi_set_profile`        | `status` set |   ✓    |     ✓     | Switch active profile                                          |
 | `bi_export_clip`        | `export`     |   ✓    |     ✓     | Async MP4/AVI/WMV export from a clip range (modes: create / status / list). Requires BI user `clipcreate=true` |
+| `bi_update_record`      | `update`     |        |     ✓     | Set memo (≤35 chars) and/or flag bits (flagged/protected/archive/export_flag) on one alert or clip @record. Read-before-write captures previous_memo + previous_flags |
 
 Every tool accepts `raw=true` — returns the underlying BI payload verbatim
 instead of the shaped view. Use it when shaping might be hiding a field
@@ -332,6 +333,40 @@ The shaped path (default) is the ergonomic one; `raw=true` exists for
 debugging the wire protocol and must show what BI actually returned —
 which, post-graduation, is an error. If you want a clean ok/false signal,
 don't pass `raw=true`.
+
+### Rule 7 — `bi_update_record` auto-preserves `flagged` on memo-only writes
+
+Verified live 2026-05-20 on BI 5.9.9.71: sending `update` with only
+`memo` (no `flags`/`mask`) **clears the `flagged` bit** on the record as
+a side effect of the BI cmd. Other named bits weren't observed to drift.
+
+To protect curation state, `bi_update_record` **auto-preserves the
+existing `flagged` bit** on memo-only writes by default. The tool
+pre-reads `flags` via `clipstats`, then synthesizes a `(flags, mask)`
+pair that pins the `flagged` bit to its current value before sending
+`update`. The response includes `flagged_auto_preserved: true` when
+this happens.
+
+```
+# Default — auto-preserve is on. flagged stays whatever it was.
+bi_update_record(path=alert_path, memo="new memo")
+# → response includes flagged_auto_preserved: true
+```
+
+Two opt-outs:
+
+* Pass `preserve_flagged=false` for raw BI semantics (memo-only writes
+  will clear flagged again).
+* Pass an explicit flag arg (`flagged=true/false`, `protected`,
+  `archive`, `export_flag`, or raw `flags`+`mask`) and the tool defers
+  to your intent — no auto-preserve, no override.
+
+The verify step also guards against silent side effects on the other
+three named bits: if the caller made no flag claims AND auto-preserve
+isn't active, post-write drift in `protected` / `archive` /
+`export_flag` raises `BiError` rather than silently returning success.
+This protects against future BI builds that might mutate additional
+flag bits we haven't characterized.
 
 ### Rule 6 — `bi_export_clip` needs the `clipcreate` user permission
 

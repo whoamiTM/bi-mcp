@@ -405,6 +405,75 @@ def shape_export_result(raw: Any) -> dict[str, Any]:
     return out
 
 
+# Flag bit definitions for the BI `update` cmd (manual § *update*).
+# Mirrored in tools_mutations._FLAG_BITS so the tool layer can build flags/mask
+# without importing the shaper.
+UPDATE_FLAG_BITS: dict[str, int] = {
+    "flagged": 2,
+    "protected": 4,
+    "archive": 64,
+    "export_flag": 512,
+}
+
+
+def _decode_update_flags(flags: Any) -> dict[str, bool] | None:
+    """Decode an integer ``flags`` field into the named bits we expose.
+
+    Returns ``None`` if ``flags`` isn't an int. Unknown bits are not surfaced
+    here — the raw integer remains in the response under ``flags``.
+    """
+    if not isinstance(flags, bool) and isinstance(flags, int):
+        return {name: bool(flags & bit) for name, bit in UPDATE_FLAG_BITS.items()}
+    return None
+
+
+def shape_update_record_result(
+    raw: Any,
+    *,
+    previous_memo: Any = None,
+    previous_flags: Any = None,
+) -> dict[str, Any]:
+    """Shape the `update` cmd reply for ``bi_update_record``.
+
+    The BI ``update`` cmd returns a ``{result, data}`` envelope. ``data``
+    echoes the post-update record fields (typically ``memo`` and ``flags``).
+    We surface:
+
+      * ``ok`` — derived from ``result``.
+      * ``memo`` / ``flags`` — post-update values (when BI echoed them).
+      * ``flags_decoded`` — named-bit view of ``flags`` (flagged/protected/
+        archive/export_flag) for ergonomic inspection.
+      * ``previous_memo`` / ``previous_flags`` / ``previous_flags_decoded`` —
+        captured by the tool's read-before-write so callers can revert.
+      * ``reason`` — on failure.
+    """
+    if not isinstance(raw, dict):
+        return {"raw": raw, "ok": False}
+    ok = raw.get("result") != "fail"
+    data = raw.get("data") if "data" in raw else raw
+    out: dict[str, Any] = {"ok": ok}
+    if not ok:
+        reason = data.get("reason") if isinstance(data, dict) else None
+        out["reason"] = reason or raw.get("result") or "unknown"
+        return out
+    if isinstance(data, dict):
+        if "memo" in data:
+            out["memo"] = data["memo"]
+        if "flags" in data:
+            out["flags"] = data["flags"]
+            decoded = _decode_update_flags(data["flags"])
+            if decoded is not None:
+                out["flags_decoded"] = decoded
+    if previous_memo is not None:
+        out["previous_memo"] = previous_memo
+    if previous_flags is not None:
+        out["previous_flags"] = previous_flags
+        prev_decoded = _decode_update_flags(previous_flags)
+        if prev_decoded is not None:
+            out["previous_flags_decoded"] = prev_decoded
+    return out
+
+
 def shape_reg(parsed: dict[str, Any], camera_short: str, mtime_age_days: float) -> dict[str, Any]:
     """Shape the parsed .reg hive output.
 

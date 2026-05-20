@@ -601,6 +601,376 @@ def _tool_export_clip(client: BiClients, args: dict) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# bi_update_record — set memo / flags on one alert or clip
+# ---------------------------------------------------------------------------
+
+
+# Manual § *update* (BlueIris_Manual.md § 9317): adjust a database entry by
+# its @record path. Sets `memo` (≤35 chars) and toggles flag bits via the
+# (flags, mask) pair. We expose two ergonomic layers:
+#
+#   * Raw: `flags` + `mask` integers, passed straight through. BI applies
+#     mask to select which bits change and flags for the on/off state.
+#   * Named bits: booleans `flagged`, `protected`, `archive`, `export_flag`
+#     compile into a (flags, mask) pair under the hood so the agent doesn't
+#     have to do bitmath.
+#
+# The named and raw paths are mutually exclusive — mixing them produces a
+# (flags, mask) pair whose semantics are easy to get wrong, so we reject
+# the combination up front. Manual-listed internal-use fields
+# (`exportfolder`, `exportprofile`, `timelapseprofile`, `date`) are
+# intentionally NOT exposed in v1 — the manual calls them out as internal
+# and no curation workflow needs them. Add later if a real use case appears.
+
+_FLAG_BITS: dict[str, int] = {
+    "flagged": 2,
+    "protected": 4,
+    "archive": 64,
+    "export_flag": 512,
+}
+
+_MEMO_MAX = 35  # Manual § *update*: "up to 35 characters"
+
+
+def _build_update_payload(args: dict) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate args, return (BI payload, requested state).
+
+    The second element is the *intended* post-state used by the verify step:
+    ``{"memo": "...", "flags_on": {bit:int → True}, "flags_off": {bit:int → True}}``.
+    Only fields actually being mutated appear. Verify checks each: memo
+    matches; for each masked bit, the post-update integer matches the
+    requested on/off state.
+    """
+    path = args.get("path")
+    if not path:
+        raise BiBadRequest(
+            "bi_update_record requires 'path' (the @record id of the alert or "
+            "clip to update; e.g. from bi_list_alerts or bi_list_clips)"
+        )
+    if not isinstance(path, str) or not path.startswith("@"):
+        raise BiBadRequest(
+            f"'path' must be an @record string (got {path!r}). @records come "
+            "from bi_list_alerts / bi_list_clips."
+        )
+
+    payload: dict[str, Any] = {"path": path}
+    intent: dict[str, Any] = {}
+
+    # --- memo ---------------------------------------------------------------
+    if "memo" in args and args["memo"] is not None:
+        memo = args["memo"]
+        if not isinstance(memo, str):
+            raise BiBadRequest(
+                f"'memo' must be a string (got {type(memo).__name__})"
+            )
+        if len(memo) > _MEMO_MAX:
+            raise BiBadRequest(
+                f"'memo' must be ≤{_MEMO_MAX} characters per BI manual § *update* "
+                f"(got {len(memo)})"
+            )
+        payload["memo"] = memo
+        intent["memo"] = memo
+
+    # --- flags / mask -------------------------------------------------------
+    raw_flags = args.get("flags")
+    raw_mask = args.get("mask")
+    raw_pair_present = raw_flags is not None or raw_mask is not None
+
+    named_present = {name: args.get(name) for name in _FLAG_BITS if args.get(name) is not None}
+
+    if raw_pair_present and named_present:
+        raise BiBadRequest(
+            "bi_update_record: pass either raw 'flags'+'mask' OR named flag args "
+            f"({'/'.join(_FLAG_BITS)}), not both. Mixing the two produces "
+            "ambiguous bit semantics."
+        )
+
+    if raw_pair_present:
+        if raw_flags is None or raw_mask is None:
+            raise BiBadRequest(
+                "bi_update_record: 'flags' and 'mask' must be passed together. "
+                "'mask' picks which bits to change; 'flags' picks the on/off state "
+                "of those bits. Pass one without the other and BI's semantics "
+                "are undefined."
+            )
+        try:
+            flags_int = int(raw_flags)
+            mask_int = int(raw_mask)
+        except (TypeError, ValueError) as e:
+            raise BiBadRequest(
+                f"'flags' and 'mask' must be integers (got flags={raw_flags!r}, mask={raw_mask!r})"
+            ) from e
+        if not (0 <= flags_int <= 0xFFFFFFFF):
+            raise BiBadRequest(f"'flags' must be in 0..0xFFFFFFFF (got {flags_int})")
+        if not (0 <= mask_int <= 0xFFFFFFFF):
+            raise BiBadRequest(f"'mask' must be in 0..0xFFFFFFFF (got {mask_int})")
+        payload["flags"] = flags_int
+        payload["mask"] = mask_int
+        intent["flags_on"] = {bit for bit in range(32) if (mask_int >> bit) & 1 and (flags_int >> bit) & 1}
+        intent["flags_off"] = {bit for bit in range(32) if (mask_int >> bit) & 1 and not ((flags_int >> bit) & 1)}
+    elif named_present:
+        flags_int = 0
+        mask_int = 0
+        for name, value in named_present.items():
+            if not isinstance(value, bool):
+                raise BiBadRequest(
+                    f"'{name}' must be a boolean (got {type(value).__name__})"
+                )
+            bit_value = _FLAG_BITS[name]
+            mask_int |= bit_value
+            if value:
+                flags_int |= bit_value
+        payload["flags"] = flags_int
+        payload["mask"] = mask_int
+        # Derive intent from the constructed (flags, mask) so this branch
+        # and the raw branch produce identical intent shapes — and so the
+        # verify loop only ever sees one representation (bit indices 0..31).
+        intent["flags_on"] = {b for b in range(32) if (mask_int >> b) & 1 and (flags_int >> b) & 1}
+        intent["flags_off"] = {b for b in range(32) if (mask_int >> b) & 1 and not ((flags_int >> b) & 1)}
+
+    # --- at-least-one-mutation guard ---------------------------------------
+    if "memo" not in payload and "flags" not in payload:
+        raise BiBadRequest(
+            "bi_update_record: no fields to update. Pass 'memo' and/or a flag "
+            f"argument ({'/'.join(_FLAG_BITS)}, or raw 'flags'+'mask')."
+        )
+
+    return payload, intent
+
+
+# BI reason fragments (case-insensitive) that prove `clipstats` rejected the
+# path because it isn't backed by a clip file (alert-only @records, etc.).
+# Anything else from BI — including auth, unreachable, rate-limit, server
+# error — must propagate with its original typed class so callers get the
+# right recovery hint.
+_CLIPSTATS_NOT_A_CLIP_FRAGMENTS = (
+    "not bvr",      # observed in BI 5.9.9.71's export-graduation path
+    "not a clip",   # defensive: undocumented but plausible BI phrasing
+    "no clip",
+)
+
+
+def _read_record_state(client: BiClients, path: str) -> tuple[Any, Any]:
+    """Pre-read memo + flags for the target @record via `clipstats`.
+
+    Returns ``(memo, flags)`` from BI's reply. Either may be ``None`` if BI
+    didn't include the field.
+
+    Exception handling is deliberately narrow:
+
+      * **Typed subclasses** of ``BiError`` (``BiUnreachable``,
+        ``BiAuthFailed``/``BiAdminAuthFailed``, ``BiBadRequest``,
+        ``BiNotFound``, …) propagate unchanged. These represent durable
+        infrastructure / auth / validation failures that need their own
+        recovery path; remapping them to ``BiBadRequest`` would hide
+        outages behind a misleading "alert-only" message.
+
+      * A **bare** ``BiError`` whose message matches a known "not a clip"
+        reason fragment is remapped to ``BiBadRequest`` with the v1
+        "clip-backed records only" hint. This is the documented limit.
+
+      * A bare ``BiError`` with any other reason is re-raised unchanged
+        so transient/unknown BI faults surface with their original
+        wording instead of being misclassified.
+    """
+    try:
+        raw = client.call("clipstats", path=path)
+    except BiError as e:
+        if type(e) is BiError:
+            msg = str(e).lower()
+            if any(frag in msg for frag in _CLIPSTATS_NOT_A_CLIP_FRAGMENTS):
+                raise BiBadRequest(
+                    f"bi_update_record pre-read: Blue Iris rejected {path!r} "
+                    f"via clipstats as not a clip-backed record ({e}). v1 "
+                    "supports clip-backed @records only. If this is an "
+                    "alert-only @record, the tool will be extended; for now "
+                    "use the BI UI."
+                ) from e
+        raise
+    if not isinstance(raw, dict):
+        return None, None
+    data = raw.get("data") if "data" in raw else raw
+    if not isinstance(data, dict):
+        return None, None
+    return data.get("memo"), data.get("flags")
+
+
+@log_tool_usage("bi_update_record")
+def _tool_update_record(client: BiClients, args: dict) -> Any:
+    _require_mutations()
+    payload, intent = _build_update_payload(args)
+    path = payload["path"]
+
+    # Read-before-write (AGENTS.md Rule 1). Capture so the response can
+    # surface previous_memo / previous_flags for revert, AND so we can
+    # auto-preserve the `flagged` bit on memo-only writes (see below).
+    previous_memo, previous_flags = _read_record_state(client, path)
+
+    # --- Auto-preserve `flagged` on memo-only writes --------------------
+    # BI 5.9.9.71 quirk (AGENTS.md Rule 7): sending `update` with only
+    # `memo` (no flags/mask) silently clears the `flagged` bit. To avoid
+    # losing user curation state on what looks like a harmless memo edit,
+    # we synthesize a (flags, mask) pair that pins the `flagged` bit to
+    # its current value whenever:
+    #
+    #   * the caller is changing memo,
+    #   * the caller did NOT pass any flag args,
+    #   * the pre-read returned an integer flags field, and
+    #   * `preserve_flagged` is not explicitly false.
+    #
+    # We pin ONLY the `flagged` bit (not all four) because that is the
+    # only side effect characterized on this BI build. Expanding to other
+    # bits would mutate state we haven't observed BI touching. Callers
+    # who want raw BI semantics can pass `preserve_flagged=False`.
+    # Validate `preserve_flagged` as a strict boolean. Truthy/falsy coercion
+    # is unsafe here: this flag controls safety-critical branching (auto-pin
+    # of the flagged bit AND the safety-net's flagged-drift carve-out). A
+    # string `'false'` would coerce to True (preserving when caller meant
+    # opt-out), and an int `1` is truthy but `1 is False` is False (so the
+    # safety net would skip its carve-out). The named flag args validate
+    # the same way — mirror that.
+    if "preserve_flagged" in args:
+        preserve_flagged = args["preserve_flagged"]
+        if not isinstance(preserve_flagged, bool):
+            raise BiBadRequest(
+                f"'preserve_flagged' must be a boolean "
+                f"(got {type(preserve_flagged).__name__})"
+            )
+    else:
+        preserve_flagged = True
+    flagged_was_preserved = False
+    if (
+        preserve_flagged
+        and "memo" in payload
+        and "flags" not in payload
+        and isinstance(previous_flags, int)
+    ):
+        flagged_bit = _FLAG_BITS["flagged"]
+        was_flagged_on = bool(previous_flags & flagged_bit)
+        payload["mask"] = flagged_bit
+        payload["flags"] = flagged_bit if was_flagged_on else 0
+        # Verify will check this bit too.
+        if was_flagged_on:
+            intent["flags_on"] = intent.get("flags_on", set()) | {1}
+        else:
+            intent["flags_off"] = intent.get("flags_off", set()) | {1}
+        flagged_was_preserved = True
+
+    # First try via the read client. If BI rejects with admin-required-style
+    # access denial, fall through to admin (mirrors what `trigger` turned out
+    # to need on 5.9.9.71). The manual doesn't mark `update` as admin-only,
+    # so optimistically attempt the lighter-privilege path first.
+    try:
+        raw = client.call_raw("update", **payload)
+    except BiError as e:
+        msg = str(e).lower()
+        if type(e) is BiError and ("access denied" in msg or "not authorized" in msg):
+            if client.resolve_admin() is None:
+                from ..errors import BiAdminRequired
+                raise BiAdminRequired(
+                    "bi_update_record was refused by Blue Iris on the read user "
+                    "(Access denied). Configure admin credentials (BI_ADMIN_USER/"
+                    "BI_ADMIN_PASS) and retry — the `update` cmd is gated on a "
+                    "permission the read user lacks."
+                ) from e
+            raw = client.admin_call_raw("update", **payload)
+        else:
+            raise
+
+    # Verify-after-write (AGENTS.md Rule 2). Re-read clipstats and confirm
+    # the requested changes landed. We deliberately use clipstats (not the
+    # update reply) because BI's `update` echo can be partial.
+    post_memo, post_flags = _read_record_state(client, path)
+
+    if "memo" in intent and post_memo != intent["memo"]:
+        raise BiError(
+            f"bi_update_record sent memo={intent['memo']!r} but post-write "
+            f"clipstats shows memo={post_memo!r}. Update did not land."
+        )
+    if "flags_on" in intent or "flags_off" in intent:
+        if not isinstance(post_flags, int):
+            raise BiError(
+                f"bi_update_record verify: post-write clipstats returned no "
+                f"integer flags field (got {post_flags!r}). Cannot confirm "
+                "flag bits changed."
+            )
+        for bit in intent.get("flags_on", set()):
+            if not ((post_flags >> bit) & 1):
+                raise BiError(
+                    f"bi_update_record: requested flag bit {1 << bit} ON but "
+                    f"post-write flags={post_flags} has it OFF."
+                )
+        for bit in intent.get("flags_off", set()):
+            if (post_flags >> bit) & 1:
+                raise BiError(
+                    f"bi_update_record: requested flag bit {1 << bit} OFF but "
+                    f"post-write flags={post_flags} has it ON."
+                )
+
+    # Extra safety net: if the caller made NO flag claims AND we didn't
+    # auto-preserve flagged, BI's update should not have changed the
+    # named bits. If it did, surface it loudly — the caller cannot have
+    # intended it. (When preserve_flagged is on this path is already
+    # covered by the intent loop above.)
+    #
+    # `flagged` is excluded from this loop when `preserve_flagged=False`:
+    # the documented opt-out contract is "raw BI semantics, including
+    # the flagged-clear side effect," so a flagged-bit change is
+    # *expected* in that mode and must not trip the safety net. The
+    # other three named bits (protected/archive/export_flag) remain
+    # watched even with the opt-out — opting out of flagged
+    # preservation isn't opting out of safety for the other three.
+    if (
+        not flagged_was_preserved
+        and "flags_on" not in intent
+        and "flags_off" not in intent
+        and isinstance(previous_flags, int)
+        and isinstance(post_flags, int)
+    ):
+        bits_to_watch = dict(_FLAG_BITS)
+        if preserve_flagged is False:
+            bits_to_watch.pop("flagged", None)
+        changed_bits = []
+        for name, bit in bits_to_watch.items():
+            before = bool(previous_flags & bit)
+            after = bool(post_flags & bit)
+            if before != after:
+                changed_bits.append((name, before, after))
+        if changed_bits:
+            details = ", ".join(
+                f"{name} {b}->{a}" for name, b, a in changed_bits
+            )
+            raise BiError(
+                f"bi_update_record verify: caller made no flag claims, but "
+                f"Blue Iris changed named flag bits as a side effect "
+                f"({details}). Refusing to silently lose curation state. "
+                "Re-run with explicit flag args, or pass preserve_flagged=true "
+                "(default) to auto-preserve the flagged bit."
+            )
+
+    if args.get("raw"):
+        return raw
+    shaped = shapers.shape_update_record_result(
+        raw,
+        previous_memo=previous_memo,
+        previous_flags=previous_flags,
+    )
+    # Always surface the verified post-write state, even if BI's `update`
+    # echo omitted it. clipstats is authoritative.
+    shaped["path"] = path
+    if post_memo is not None:
+        shaped["memo"] = post_memo
+    if isinstance(post_flags, int):
+        shaped["flags"] = post_flags
+        shaped["flags_decoded"] = {
+            name: bool(post_flags & bit) for name, bit in _FLAG_BITS.items()
+        }
+    if flagged_was_preserved:
+        shaped["flagged_auto_preserved"] = True
+    return shaped
+
+
+# ---------------------------------------------------------------------------
 # registration
 # ---------------------------------------------------------------------------
 
@@ -791,5 +1161,98 @@ def register() -> None:
             "destructiveHint": True,
             "idempotentHint": False,
             "title": "Set BI active profile",
+        },
+    )
+
+    register_tool(
+        "bi_update_record",
+        _tool_update_record,
+        description=(
+            "Set memo (≤35 chars) and/or flag bits on one alert or clip @record, "
+            "wrapping BI `update` (manual § *update*). How UI3 curates the "
+            "alert/clip database — mark records flagged, protected, archive, or "
+            "export. "
+            "Two ways to drive flag bits: "
+            "(a) named booleans 'flagged' / 'protected' / 'archive' / 'export_flag' "
+            "(mutually exclusive with raw flags+mask), or "
+            "(b) raw 'flags' + 'mask' integers passed together (mask selects which "
+            "bits change, flags sets their on/off state). "
+            "Mandatory pre-read via clipstats captures previous_memo + previous_flags "
+            "for revert; mandatory post-read verifies the change landed. "
+            "**BI 5.9.9.71 quirk**: a memo-only `update` silently clears the "
+            "`flagged` bit. To protect curation state, this tool auto-preserves "
+            "the existing `flagged` bit on memo-only writes by default; the response "
+            "includes `flagged_auto_preserved: true` when this happens. Pass "
+            "`preserve_flagged=false` to opt out (raw BI semantics). Verify-after-write "
+            "also refuses silent named-flag changes when the caller made no flag claims. "
+            "v1 supports clip-backed @records only (alert-only records may be "
+            "rejected by clipstats; revisit if it becomes friction). "
+            "Internal-use fields (exportfolder, exportprofile, timelapseprofile, "
+            "date) are intentionally not exposed. "
+            "Requires BI_MCP_ALLOW_MUTATIONS=1."
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                **COMMON_SCHEMA,
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "@record id of the alert or clip to update (e.g. from "
+                        "bi_list_alerts or bi_list_clips). Required."
+                    ),
+                },
+                "memo": {
+                    "type": "string",
+                    "description": "Up to 35 characters; replaces the existing memo on the record.",
+                },
+                "flagged": {
+                    "type": "boolean",
+                    "description": "Set the 'flagged' bit (BI flag 2). Mutually exclusive with raw flags+mask.",
+                },
+                "protected": {
+                    "type": "boolean",
+                    "description": "Set the 'protected' bit (BI flag 4). Mutually exclusive with raw flags+mask.",
+                },
+                "archive": {
+                    "type": "boolean",
+                    "description": "Set the 'archive' bit (BI flag 64). Mutually exclusive with raw flags+mask.",
+                },
+                "export_flag": {
+                    "type": "boolean",
+                    "description": "Set the 'export' bit (BI flag 512). Mutually exclusive with raw flags+mask.",
+                },
+                "flags": {
+                    "type": "integer",
+                    "description": (
+                        "Raw flag bits (must be paired with 'mask'). 'mask' picks "
+                        "which bits to change, 'flags' picks their on/off state. "
+                        "Mutually exclusive with named flag args."
+                    ),
+                },
+                "mask": {
+                    "type": "integer",
+                    "description": (
+                        "Raw mask bits (must be paired with 'flags'). See 'flags'."
+                    ),
+                },
+                "preserve_flagged": {
+                    "type": "boolean",
+                    "description": (
+                        "Default true. On memo-only writes (no flag args), the "
+                        "tool auto-pins the `flagged` bit to its current value to "
+                        "work around a BI 5.9.9.71 quirk that clears it silently. "
+                        "Pass false for raw BI semantics."
+                    ),
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": True,
+        },
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "title": "Update BI record memo/flags",
         },
     )
