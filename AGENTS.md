@@ -14,7 +14,7 @@ here. Read this first when entering a fresh session.
 - **Tested against:** Blue Iris **5.9.9.71** (x64) on Windows 10.
 - **Mode:** stdio MCP server. Read-only by default; mutating tools register
   only when `BI_MCP_ALLOW_MUTATIONS=1`.
-- **Surface:** 14 read tools (always) + 6 mutating tools (when enabled).
+- **Surface:** 15 read tools (always) + 6 mutating tools (when enabled).
 
 ---
 
@@ -28,6 +28,7 @@ here. Read this first when entering a fresh session.
 | "What recorded between A and B?"                                         | `bi_list_clips(camera="...", startdate=…, enddate=…)`    |
 | "Why did this specific alert fire?"                                      | `bi_list_alerts` → `bi_get_alert_tracks` + `bi_get_clip_info` |
 | "Show me trigger zones / AI threshold for camera X"                      | `bi_get_reg(camera="...")` — NOT `bi_get_camera_config`  |
+| "Show me current motion sensitivity / contrast / breaktime"              | `bi_get_camera_motion_config(short="...")` — live, no stale .reg |
 | "What's MQTT/archive/global-schedule state?"                             | `bi_get_sysconfig` (admin required)                      |
 | "What's PTZ doing?" / available presets                                  | `bi_get_ptz_status(camera="...")`                        |
 | "Recent errors in BI log"                                                | `bi_list_log(levels=[2], since="-1h")`                   |
@@ -54,6 +55,7 @@ For static facts (camera → IP, role, friendly name), do **not** call
 | `bi_get_sysconfig`      | `sysconfig`  |   ✓    |           | Archive/schedule/manrecsec + any DIO/MQTT inline               |
 | `bi_list_cameras`       | `camlist`    |        |           | All cameras + groups                                           |
 | `bi_get_camera_config`  | `camconfig`/`camlist` | (deep needs admin) | | Per-camera config (deep w/ admin, shallow without)        |
+| `bi_get_camera_motion_config` | `camconfig` |   ✓    |           | Live motion + post-trigger settings (`setmotion` + `setpost`); read-only, no `.reg` staleness — AI thresholds NOT included |
 | `bi_list_alerts`        | `alertlist`  |        |           | Recent AI/motion alerts                                        |
 | `bi_get_alert_tracks`   | `tracks`     |        |           | Per-frame bounding boxes for one alert                         |
 | `bi_get_clip_info`      | `clipstats`  |        |           | Forensic clip metadata                                         |
@@ -127,6 +129,13 @@ on a returned alert item is **alert length**, not clip length.
 bi_get_camera_config(short="SecCam_3")
     → top-level: motion sense/contrast, AI zones bitmask, recording mode,
       stream paths, schedule/profile flags
+        ↓ (motion/post drill-down, live, no .reg staleness)
+bi_get_camera_motion_config(short="SecCam_3")
+    → setmotion (sense, contrast, breaktime, maketime, ai_zones, etc.) +
+      setpost (timed, timed_interval) read live from camconfig. Use this
+      while tuning sensitivity in the UI — diffs against bi_get_reg
+      ("Motion" subkey for profile 1; "Motion\\<n>" subject to off-by-one).
+      Does NOT expose AI thresholds — those stay .reg-only.
         ↓ (when the question goes deeper)
 bi_get_reg(camera="SecCam_3", key_path="AI\\3")
     → per-class confidence thresholds, smartlabels, smartzones bitmask,

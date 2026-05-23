@@ -113,6 +113,53 @@ def _tool_get_camera_config(client: BiClients, args: dict) -> Any:
     return shaped
 
 
+@log_tool_usage("bi_get_camera_motion_config")
+def _tool_get_camera_motion_config(client: BiClients, args: dict) -> Any:
+    short = args.get("short") or args.get("short_name") or args.get("camera")
+    if not short:
+        raise BiBadRequest(
+            "bi_get_camera_motion_config requires a 'short' (camera short name) argument"
+        )
+    # Admin-required, no camlist fallback. camlist carries no motion data, so a
+    # shallow fallback would mislead the caller — the whole point of this tool
+    # is the live setmotion/setpost subtrees. Surface a typed error instead.
+    #
+    # Let BiAdminAuthFailed propagate (configured creds rejected — admin_auth
+    # remediation: rotate creds / check lockout). Only synthesize
+    # BiAdminRequired when no admin path is configured at all (admin_required
+    # remediation: set creds). Conflating the two misleads the caller into the
+    # wrong fix and, in the lockout case, into retries that deepen the lockout.
+    if client.resolve_admin() is None:
+        raise BiAdminRequired(
+            "bi_get_camera_motion_config requires admin BI credentials. "
+            "Set BI_ADMIN_USER/BI_ADMIN_PASS in bi-mcp/.env."
+        )
+    raw = client.admin_call("camconfig", camera=short)
+    # Unknown-camera reply on BI 5.9.9.71 is an empty dict (empirically
+    # confirmed 2026-05-23 with cmd=camconfig camera=ZZZ_does_not_exist).
+    if isinstance(raw, dict) and not raw:
+        raise BiNotFound(f"No camera with short name '{short}' found")
+    # Strict invariant for the shaped path: the whole point of this tool is
+    # the live `setmotion` + `setpost` subtrees. If BI returns a non-dict, or
+    # a dict missing either key, the response is malformed (schema drift,
+    # partial error envelope, future BI build that renamed the field) and
+    # callers must NOT receive a structurally-valid-looking but empty
+    # motion/post payload. Raw=true callers opt out of this check — they
+    # explicitly asked for the wire payload, drift and all.
+    if not args.get("raw"):
+        if not isinstance(raw, dict) or not isinstance(raw.get("setmotion"), dict) or not isinstance(raw.get("setpost"), dict):
+            keys = sorted(raw.keys()) if isinstance(raw, dict) else None
+            raise BiError(
+                f"camconfig response for '{short}' is missing required "
+                f"`setmotion` and/or `setpost` subtrees. This indicates BI "
+                f"schema drift or a malformed reply. Top-level keys observed: "
+                f"{keys}. Re-run with raw=true to inspect the wire payload."
+            )
+    if args.get("raw"):
+        return raw
+    return shapers.shape_motion_config(raw)
+
+
 def register() -> None:
     register_tool(
         "bi_list_cameras",
@@ -155,4 +202,36 @@ def register() -> None:
             "additionalProperties": True,
         },
         annotations={"readOnlyHint": True, "title": "Get BI camera config"},
+    )
+
+    register_tool(
+        "bi_get_camera_motion_config",
+        _tool_get_camera_motion_config,
+        description=(
+            "Live motion + post-trigger settings for a camera, read from BI's admin "
+            "`camconfig` cmd. Use this instead of `bi_get_reg(key_path='Motion')` to "
+            "avoid stale .reg exports when tuning sensitivity/contrast/breaktime. "
+            "Returns `motion` (12 keys: sense, contrast, breaktime, maketime, usemask, "
+            "objects, ai_zones, shadows, luminance, showmotion, audio_trigger, "
+            "audio_sense) and `post` (timed, timed_interval) plus verbatim `motion_raw` "
+            "/ `post_raw` twins. AI thresholds (smartconf, smartlabels, periodic, "
+            "static-objects) are NOT in camconfig — use bi_get_reg(key_path='AI\\\\<n>') "
+            "for those. Trigger-zone polygons stay in bi_get_reg(key_path='Motion') "
+            "under maskbits_*. Admin-required. Note: the camconfig set-half for "
+            "setmotion/setpost is a silent no-op in 5.9.9.71 — this tool is read-only "
+            "by design; tune in the BI UI."
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                **COMMON_SCHEMA,
+                "short": {
+                    "type": "string",
+                    "description": "Camera short name (e.g. 'SecCam_3'). Required.",
+                },
+            },
+            "required": ["short"],
+            "additionalProperties": True,
+        },
+        annotations={"readOnlyHint": True, "title": "Get BI camera motion config"},
     )

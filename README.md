@@ -166,6 +166,7 @@ mutation-safety rules, see [AGENTS.md](AGENTS.md).
 | `bi_get_sysconfig` | `sysconfig` | ✓ | | Archive/schedule/manrecsec + any DIO/MQTT inline. |
 | `bi_list_cameras` | `camlist` | | | All cameras and groups: online state, trigger counts, stream health. |
 | `bi_get_camera_config` | `camconfig`/`camlist` | (deep) | | Per-camera config (deep w/ admin, shallow w/o). |
+| `bi_get_camera_motion_config` | `camconfig` | ✓ | | Live `setmotion` + `setpost` subtrees — current sensitivity/contrast/breaktime/etc. without `.reg` staleness. AI thresholds NOT included. |
 | `bi_list_alerts` | `alertlist` | | | Recent alerts with AI memo, classification, zones, clip path. |
 | `bi_get_alert_tracks` | `tracks` | | | AI per-frame bounding boxes inside one alert. |
 | `bi_get_clip_info` | `clipstats` | | | Forensic detail for one clip. |

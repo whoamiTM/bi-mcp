@@ -120,6 +120,42 @@ def shape_camera_config_deep(raw: Any) -> Any:
     return _walk(raw)
 
 
+def shape_motion_config(raw: Any) -> dict[str, Any]:
+    """Shape `camconfig` for `bi_get_camera_motion_config`.
+
+    Surfaces the two nested config subtrees BI exposes on the wire (`setmotion`
+    and `setpost`) under stable names, with verbatim raw twins for callers that
+    need to escape the shaping.
+
+    Empirical recon 2026-05-23 (BI 5.9.9.71) across PTZ master, fixed cam, and
+    clone confirmed:
+      * `camconfig` exposes exactly `setmotion` + `setpost`. There is no
+        `setai`. AI thresholds remain `bi_get_reg(key_path="AI\\<n>")`-only.
+      * All 12 `setmotion` keys present on every camera topology — no
+        clone-inherit branch needed, no PTZ-vs-fixed shape branch needed.
+      * Wire-side `setmotion.usemask` ↔ `.reg Motion.mask`. Type coercion for
+        showmotion/shadows/luminance: int (.reg) → bool (wire). Shaper does NOT
+        normalize either — wire shape is preserved verbatim so the raw twin
+        and the shaped view always agree.
+
+    The tool layer (`_tool_get_camera_motion_config`) enforces the invariant
+    that `raw` is a dict containing both `setmotion` and `setpost` as dicts
+    before calling this shaper — so we don't re-validate here. Callers who
+    invoke the shaper directly outside that tool path must enforce the same
+    invariant themselves or accept that malformed input may produce an
+    incomplete-looking but structurally-valid response.
+    """
+    motion = raw["setmotion"]
+    post = raw["setpost"]
+    return _drop_empty({
+        "motion": dict(motion),
+        "post": dict(post),
+        "motion_raw": dict(motion),
+        "post_raw": dict(post),
+        "_source": "camconfig",
+    })
+
+
 def shape_camera_config(raw: Any, short_name: str) -> dict[str, Any] | None:
     """From a `camlist` response, pick the single camera matching short_name."""
     if not isinstance(raw, list):
