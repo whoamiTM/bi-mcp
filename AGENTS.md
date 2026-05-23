@@ -30,7 +30,8 @@ here. Read this first when entering a fresh session.
 | "Show me trigger zones / AI threshold for camera X"                      | `bi_get_reg(camera="...")` — NOT `bi_get_camera_config`  |
 | "What's MQTT/archive/global-schedule state?"                             | `bi_get_sysconfig` (admin required)                      |
 | "What's PTZ doing?" / available presets                                  | `bi_get_ptz_status(camera="...")`                        |
-| "Recent errors in BI log"                                                | `bi_list_log(level=2)`                                    |
+| "Recent errors in BI log"                                                | `bi_list_log(levels=[2], since="-1h")`                   |
+| "Why did SecCam_3 trigger 10 min ago?"                                   | `bi_list_log(camera="SecCam_3", since="-15m", levels=[3])` |
 | "Fire a test alert on camera X" (requires mutations)                     | `bi_trigger_camera(camera="...", memo="...")`            |
 | "Move PTZ to preset N" (requires mutations)                              | `bi_get_ptz_status` first → `bi_set_ptz_preset(...)`     |
 | "Change to night profile" (requires mutations)                           | `bi_get_status` first → `bi_set_profile(...)` → revert   |
@@ -59,7 +60,7 @@ For static facts (camera → IP, role, friendly name), do **not** call
 | `bi_list_clips`         | `cliplist`   |        |           | Recorded clip inventory                                        |
 | `bi_get_timeline`       | `timeline`   |        |           | 24-hour activity timeline                                      |
 | `bi_get_ptz_status`     | `ptz` (query)|        |           | PTZ state: raw `presets[]` + `presetnum` passthrough, plus derived `preset_map` {N→desc} and `active_preset` {num,description} |
-| `bi_list_log`           | `log`        |   ✓    |           | System log entries                                             |
+| `bi_list_log`           | `log`        |   ✓    |           | System log entries with filters (since/camera/obj/levels/match/regex). Returns {entries, scanned, matched, warning?} |
 | `bi_get_reg`            | (file)       |        |           | .reg hive parse — for what the API can't reach                 |
 | `bi_get_actionset`      | (file)       |        |           | Semantic view of Alerts\\OnTrigger / OnReset (decoded)         |
 | `bi_trigger_camera`     | `trigger`    |   ✓    |     ✓     | Fire a synthetic motion trigger                                |
@@ -499,6 +500,16 @@ One call. If it didn't land, fix the config — don't pile up alerts.
 
 `bi_set_profile` is global. If you're A/B testing, capture
 `previous_profile` from the response and flip back before turn end.
+
+### ❌ Calling `bi_list_log` without `since` for camera-scoped debugging
+
+BI's log buffer holds thousands of entries (3.8k+ on a typical install).
+`since="-15m"` — or an explicit timestamp from `bi_list_alerts` — returns a
+fraction of that and avoids client-side scanning the full buffer for a
+substring match. A `warning` is emitted in the response envelope when
+filters run without a time bound. Clone cameras (e.g. `SecCam_11AI` cloned
+from `SecCam_11`) log under their own short names; query each by its actual
+name rather than expecting prefix-match magic.
 
 ---
 

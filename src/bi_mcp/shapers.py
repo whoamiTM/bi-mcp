@@ -135,14 +135,24 @@ def shape_camera_config(raw: Any, short_name: str) -> dict[str, Any] | None:
 
 
 def shape_log(raw: Any, limit: int = 100) -> list[dict[str, Any]]:
-    """Shape the `log` response — array of log entries."""
+    """Shape the `log` response — array of log entries.
+
+    Per-entry fields (empirical, BI 5.9.9.71): ``date`` (UTC sec), ``level``,
+    ``obj``, ``msg``, optional ``count`` (a string in the raw payload).
+    """
     if not isinstance(raw, list):
         return [{"raw": raw}]
     out: list[dict[str, Any]] = []
     for entry in raw:
         if not isinstance(entry, dict):
             continue
-        out.append(_drop_empty(_replace_ts(entry, ("utc", "time"))))
+        shaped = _drop_empty(_replace_ts(entry, ("date",)))
+        if "count" in shaped:
+            try:
+                shaped["count"] = int(shaped["count"])
+            except (TypeError, ValueError):
+                pass
+        out.append(shaped)
     return out[: max(0, int(limit))]
 
 
