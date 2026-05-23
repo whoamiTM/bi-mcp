@@ -15,13 +15,23 @@ retried — Blue Iris has built-in brute-force lockout.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 
-from .errors import BiAdminAuthFailed, BiAuthFailed, BiBadRequest, BiError, BiNotFound, BiUnreachable
+from .errors import (
+    BiAdminAuthFailed,
+    BiAuthFailed,
+    BiBadRequest,
+    BiError,
+    BiNotFound,
+    BiUnreachable,
+    BiVerifyAuthBlip,
+    BiVerifyUnreachable,
+)
 from .logging_setup import get_logger
 
 log = get_logger()
@@ -255,6 +265,79 @@ class BiClients:
                 "existing BI_USER."
             )
         return admin
+
+    @contextlib.contextmanager
+    def fresh_admin_session(self) -> Iterator[BiClient]:
+        """Yield a throwaway admin ``BiClient`` for verify-after-write reads.
+
+        Brand-new httpx session and BI session token, cloned from the admin
+        user's credentials — never touches the shared admin singleton.
+        Automatically closed on exit.
+
+        Why this exists: BI 5.9.9.71 returns stale camconfig/camlist reads
+        to the session that issued the write for ~2-3s. Defeating that
+        staleness used to mean clearing the shared singleton's session token
+        mid-call, which corrupted overlapping tool calls (Codex review
+        2026-05-22). A throwaway client per verify call defeats staleness
+        without the singleton hazard.
+
+        Pair with :meth:`verify_call` (preferred) so auth blips during
+        verification are surfaced as ``BiVerifyInconclusive`` rather than
+        hard admin-auth errors.
+        """
+        src = self.admin_or_raise()
+        fresh = BiClient(host=src.host, port=src.port, user=src.user, password=src._password)
+        try:
+            yield fresh
+        finally:
+            fresh.close()
+
+    @staticmethod
+    def verify_call(fresh: BiClient, cmd: str, **payload: Any) -> Any:
+        """Run a post-write verification read through a fresh admin client.
+
+        Converts blip-class verify-side failures into typed subclasses of
+        ``BiVerifyInconclusive``:
+
+          * ``BiAuthFailed`` → ``BiVerifyAuthBlip`` (kind=``verify_auth_blip``).
+            Throwaway login could not authenticate. Causes range from
+            transient (BI session pressure, parallel admin logins) to
+            durable (creds rotated, account locked). Callers seeing this
+            repeatedly should investigate creds rather than blind-retry.
+          * ``BiUnreachable`` → ``BiVerifyUnreachable``
+            (kind=``verify_unreachable``). Network blip / timeout / BI
+            restart. Almost always transient.
+
+        Rationale for distinct kinds: a verify-side auth failure deserves
+        different handling than a network blip — a single boolean
+        "inconclusive" flag would hide durable creds breakage behind a
+        transient-looking flag. Surfacing the kind lets callers escalate
+        auth-class blips on repeat without us having to do (brittle)
+        stateful classification at the verify layer.
+
+        Rationale for raising at all (rather than returning): the write
+        already succeeded (verify only runs after a success reply), so
+        these are not "BI is down" / "creds are wrong" failures from the
+        caller's perspective — they are "write landed, post-read couldn't
+        confirm" situations. Dispatchers catch and convert to
+        ``verified=False`` + structured ``verify_error_kind`` in the
+        response, while keeping ``ok=True`` (the write *was* accepted).
+
+        Structural / logic errors (``BiBadRequest``, ``BiNotFound``, and
+        bare ``BiError`` for malformed responses) propagate unchanged —
+        those indicate real bugs in the verify path that the caller needs
+        to see loudly.
+        """
+        try:
+            return fresh.call(cmd, **payload)
+        except BiAuthFailed as e:
+            raise BiVerifyAuthBlip(
+                f"verify read cmd={cmd} could not authenticate: {e}"
+            ) from e
+        except BiUnreachable as e:
+            raise BiVerifyUnreachable(
+                f"verify read cmd={cmd} could not reach Blue Iris: {e}"
+            ) from e
 
     def admin_call(self, cmd: str, **payload: Any) -> Any:
         """Call an admin-gated BI cmd. Re-tags BiAuthFailed from the admin

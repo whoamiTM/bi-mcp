@@ -101,6 +101,67 @@ class BiMutationsDisabled(BiError):
     )
 
 
+class BiVerifyInconclusive(BiError):
+    """Raised by verify-after-write helpers when the post-write read could not
+    complete — e.g. the throwaway admin login transiently failed, or the
+    fresh client could not reach BI.
+
+    Dispatchers should CATCH this rather than letting it propagate: the write
+    itself already succeeded (verify only runs after a successful write
+    reply), so the correct outcome is a structured "changed-but-unverified"
+    response, not a hard auth/error to the caller. Surfacing this as a
+    typed exception keeps the verify helpers ignorant of the dispatcher's
+    response shape while letting the dispatcher distinguish verify-side
+    blips from real verify mismatches (which are still ``BiError``).
+
+    The two concrete subclasses below — ``BiVerifyAuthBlip`` and
+    ``BiVerifyUnreachable`` — carry distinct ``kind`` values so callers can
+    escalate auth-class blips (which may indicate creds rotation, lockout,
+    or BI restart) differently from network-class blips. The base class is
+    retained for ``except BiVerifyInconclusive`` catch-alls in dispatchers.
+    """
+
+    kind = "verify_inconclusive"
+    hint = (
+        "The write was accepted by Blue Iris but the post-write verify read "
+        "could not be completed (transient auth or connectivity blip). The "
+        "change may or may not have landed — re-read the field to confirm."
+    )
+
+
+class BiVerifyAuthBlip(BiVerifyInconclusive):
+    """Verify-side throwaway login could not authenticate.
+
+    Causes range from transient (BI session pressure, brief auth hiccup,
+    parallel admin logins) to durable (creds rotated, account locked out).
+    Callers seeing this repeatedly across multiple tool calls should
+    investigate ``BI_ADMIN_USER``/``BI_ADMIN_PASS`` rather than treat each
+    occurrence as transient.
+    """
+
+    kind = "verify_auth_blip"
+    hint = (
+        "The write was accepted, but the verify-side admin login failed. "
+        "If this recurs, check BI_ADMIN_USER/BI_ADMIN_PASS for rotation or "
+        "lockout — Blue Iris locks accounts after repeated failed logins."
+    )
+
+
+class BiVerifyUnreachable(BiVerifyInconclusive):
+    """Verify-side fresh client could not reach Blue Iris.
+
+    Network blip, timeout, or BI restarted between the write and the verify
+    read. Almost always transient.
+    """
+
+    kind = "verify_unreachable"
+    hint = (
+        "The write was accepted, but the verify-side read could not reach "
+        "Blue Iris (network blip or BI restart). Re-read the field to "
+        "confirm the change landed."
+    )
+
+
 class BiStaleReg(BiError):
     """A .reg file used by bi_get_reg is older than the staleness threshold.
 

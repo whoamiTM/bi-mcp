@@ -22,7 +22,7 @@ from typing import Any
 
 from .. import shapers
 from ..client import BiClients
-from ..errors import BiBadRequest, BiError, BiMutationsDisabled
+from ..errors import BiBadRequest, BiError, BiMutationsDisabled, BiVerifyInconclusive
 from ..utils.logging import log_tool_usage
 from .registry import mutations_enabled, register_tool
 from .tools_status import COMMON_SCHEMA
@@ -1215,37 +1215,34 @@ def _verify_camconfig(
 
     Phase 0 finding: in BI 5.9.9.71 the session that issued the camconfig
     write can read back stale values for several fields (output, audio in
-    some cases). The same fresh-login + retry pattern that defeats
-    camlist staleness for rename also defeats camconfig staleness here.
-    Without this, output revert (and similar) will spuriously fail verify
-    even though the BI side committed the change.
+    some cases). A throwaway admin client (separate BI session) defeats
+    that staleness without mutating the shared admin singleton — see
+    ``BiClients.fresh_admin_client``.
     """
     import time
 
     delays = (0.0, 1.0, 2.0)  # ~3s total — enough for in-session staleness to clear
     last_post: dict[str, Any] | None = None
     last_value: Any = None
-    for delay in delays:
-        if delay > 0:
-            time.sleep(delay)
-        admin = client.resolve_admin()
-        if admin is not None:
-            admin.session = None
-        post = client.admin_call("camconfig", camera=camera)
-        if not isinstance(post, dict):
-            continue
-        last_post = post
-        if op_name == "profile_lock":
-            actual_profile = post.get("profile")
-            actual_lock_raw = post.get("lock")
-            try:
-                actual_lock = int(actual_lock_raw) if actual_lock_raw is not None else None
-            except (TypeError, ValueError):
-                actual_lock = None
-            last_value = {"profile": actual_profile, "lock": actual_lock}
-        else:
-            read_key = _CAMCONFIG_READ_KEY.get(op_name, op_name)
-            last_value = post.get(read_key)
+    with client.fresh_admin_session() as fresh:
+        for delay in delays:
+            if delay > 0:
+                time.sleep(delay)
+            post = client.verify_call(fresh, "camconfig", camera=camera)
+            if not isinstance(post, dict):
+                continue
+            last_post = post
+            if op_name == "profile_lock":
+                actual_profile = post.get("profile")
+                actual_lock_raw = post.get("lock")
+                try:
+                    actual_lock = int(actual_lock_raw) if actual_lock_raw is not None else None
+                except (TypeError, ValueError):
+                    actual_lock = None
+                last_value = {"profile": actual_profile, "lock": actual_lock}
+            else:
+                read_key = _CAMCONFIG_READ_KEY.get(op_name, op_name)
+                last_value = post.get(read_key)
     if last_post is None:
         raise BiError(
             f"bi_set_camera verify: camconfig post-read returned non-dict "
@@ -1264,9 +1261,9 @@ def _verify_camlist(
     observations: rename has ~2-3s propagation, hide/manrec are sync but the
     extra polls cost nothing.
 
-    Uses a fresh admin login on each poll to defeat the same-session camlist
-    staleness observed for `rename` and `enable` writes — see the semantics
-    memory.
+    Uses a throwaway admin client (separate BI session) to defeat the
+    same-session camlist staleness observed for `rename` and `enable`
+    writes — see ``BiClients.fresh_admin_client`` and the semantics memory.
     """
     import time
 
@@ -1284,25 +1281,21 @@ def _verify_camlist(
     delays = (0.0, 1.0, 2.0, 3.0)  # ~6s total budget — covers the ~2-3s rename lag
     last_row: dict[str, Any] | None = None
     last_value: Any = None
-    for delay in delays:
-        if delay > 0:
-            time.sleep(delay)
-        # Force a fresh admin login by clearing the session, so we get a
-        # camlist read uncached by the write-side staleness pattern.
-        admin = client.resolve_admin()
-        if admin is not None:
-            admin.session = None
-        raw = client.admin_call("camlist")
-        if not isinstance(raw, list):
-            continue
-        for cam in raw:
-            if isinstance(cam, dict) and cam.get("optionValue") == camera:
-                last_row = cam
-                last_value = cam.get(target_field)
-                break
-        # We don't break on a "correct" value because the caller still wants
-        # to see what we landed on, not just a yes/no. The dispatcher's
-        # mismatch check below will decide.
+    with client.fresh_admin_session() as fresh:
+        for delay in delays:
+            if delay > 0:
+                time.sleep(delay)
+            raw = client.verify_call(fresh, "camlist")
+            if not isinstance(raw, list):
+                continue
+            for cam in raw:
+                if isinstance(cam, dict) and cam.get("optionValue") == camera:
+                    last_row = cam
+                    last_value = cam.get(target_field)
+                    break
+            # We don't break on a "correct" value because the caller still wants
+            # to see what we landed on, not just a yes/no. The dispatcher's
+            # mismatch check below will decide.
     return last_value, last_row
 
 
@@ -1343,29 +1336,27 @@ def _verify_stream_dip(
     # transition (cam offline by the time of our first sample) still counts.
     last_online: bool | None = pre_isOnline
     saw_transition = False
-    while time.monotonic() < deadline:
-        admin = client.resolve_admin()
-        if admin is not None:
-            admin.session = None
-        raw = client.admin_call("camlist")
-        if isinstance(raw, list):
-            for cam in raw:
-                if isinstance(cam, dict) and cam.get("optionValue") == camera:
-                    current_online = cam.get("isOnline")
-                    sample = {
-                        "isOnline": current_online,
-                        "FPS": cam.get("FPS"),
-                        "error": cam.get("error"),
-                    }
-                    samples.append(sample)
-                    if (
-                        last_online is True
-                        and current_online is False
-                    ):
-                        saw_transition = True
-                    last_online = current_online
-                    break
-        time.sleep(interval_s)
+    with client.fresh_admin_session() as fresh:
+        while time.monotonic() < deadline:
+            raw = client.verify_call(fresh, "camlist")
+            if isinstance(raw, list):
+                for cam in raw:
+                    if isinstance(cam, dict) and cam.get("optionValue") == camera:
+                        current_online = cam.get("isOnline")
+                        sample = {
+                            "isOnline": current_online,
+                            "FPS": cam.get("FPS"),
+                            "error": cam.get("error"),
+                        }
+                        samples.append(sample)
+                        if (
+                            last_online is True
+                            and current_online is False
+                        ):
+                            saw_transition = True
+                        last_online = current_online
+                        break
+            time.sleep(interval_s)
     return {"observed_offline_transition": saw_transition, "samples": samples}
 
 
@@ -1463,77 +1454,92 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
         )
 
     # ----- Verify-after-write ---------------------------------------------
+    # Verify-side auth/connectivity blips MUST NOT roll back to a hard
+    # admin-auth error: the write already succeeded above, so the honest
+    # response is "changed but unverified". Each branch below catches
+    # ``BiVerifyInconclusive``, sets ``verified=False`` + ``verify_error_kind``,
+    # and skips the per-op mismatch check (we have no post-read to compare).
     new_value: Any = None
     verify_method: str | None = None
     extras: dict[str, Any] = {}
+    verify_inconclusive: BiVerifyInconclusive | None = None
     if op_name in _VERIFY_VIA_CAMCONFIG:
-        new_value, _post = _verify_camconfig(client, camera, op_name, payload)
         verify_method = "camconfig"
-        # Per-op verification of landing.
-        if op_name == "profile_lock":
-            want_profile = payload.get("profile")
-            want_lock = payload.get("lock")
-            got_profile = new_value.get("profile") if isinstance(new_value, dict) else None
-            got_lock = new_value.get("lock") if isinstance(new_value, dict) else None
-            if want_profile is not None and got_profile != want_profile:
-                # Document the known BI quirk: profile=-1 on an enabled cam
-                # silently coerces to the current global. Surface a more
-                # useful error than a generic mismatch.
-                if want_profile == -1:
+        try:
+            new_value, _post = _verify_camconfig(client, camera, op_name, payload)
+        except BiVerifyInconclusive as e:
+            verify_inconclusive = e
+        if verify_inconclusive is None:
+            # Per-op verification of landing — only meaningful when the
+            # post-read actually came back.
+            if op_name == "profile_lock":
+                want_profile = payload.get("profile")
+                want_lock = payload.get("lock")
+                got_profile = new_value.get("profile") if isinstance(new_value, dict) else None
+                got_lock = new_value.get("lock") if isinstance(new_value, dict) else None
+                if want_profile is not None and got_profile != want_profile:
+                    # Document the known BI quirk: profile=-1 on an enabled cam
+                    # silently coerces to the current global. Surface a more
+                    # useful error than a generic mismatch.
+                    if want_profile == -1:
+                        raise BiError(
+                            f"bi_set_camera profile=-1 was rejected by BI: "
+                            f"post-read shows profile={got_profile!r} (likely the "
+                            "current global). On an enabled camera, BI silently "
+                            "coerces profile=-1 to the global profile. To clear "
+                            "the per-camera override, call enable=false (which "
+                            "auto-resets profile to -1) then enable=true."
+                        )
                     raise BiError(
-                        f"bi_set_camera profile=-1 was rejected by BI: "
-                        f"post-read shows profile={got_profile!r} (likely the "
-                        "current global). On an enabled camera, BI silently "
-                        "coerces profile=-1 to the global profile. To clear "
-                        "the per-camera override, call enable=false (which "
-                        "auto-resets profile to -1) then enable=true."
+                        f"bi_set_camera sent profile={want_profile} but post-read "
+                        f"shows profile={got_profile!r}. Change did not land."
                     )
-                raise BiError(
-                    f"bi_set_camera sent profile={want_profile} but post-read "
-                    f"shows profile={got_profile!r}. Change did not land."
+                if want_lock is not None and got_lock != int(want_lock):
+                    raise BiError(
+                        f"bi_set_camera sent lock={want_lock} but post-read "
+                        f"shows lock={got_lock!r}."
+                    )
+            elif op_name == "pause":
+                # pause write reply echoes seconds remaining; post-read camconfig
+                # shows the same. The relationship between the input code and the
+                # output seconds is BI-internal, so we don't enforce equality.
+                # We do flag the additive-pause behavior in the response so the
+                # caller knows what landed.
+                extras["pause_seconds_remaining"] = new_value
+                extras["pause_additive_note"] = (
+                    "BI pause codes 1..10 are additive — calling the same code "
+                    "twice extends, doesn't replace. Send pause=0 to cancel."
                 )
-            if want_lock is not None and got_lock != int(want_lock):
-                raise BiError(
-                    f"bi_set_camera sent lock={want_lock} but post-read "
-                    f"shows lock={got_lock!r}."
-                )
-        elif op_name == "pause":
-            # pause write reply echoes seconds remaining; post-read camconfig
-            # shows the same. The relationship between the input code and the
-            # output seconds is BI-internal, so we don't enforce equality.
-            # We do flag the additive-pause behavior in the response so the
-            # caller knows what landed.
-            extras["pause_seconds_remaining"] = new_value
-            extras["pause_additive_note"] = (
-                "BI pause codes 1..10 are additive — calling the same code "
-                "twice extends, doesn't replace. Send pause=0 to cancel."
-            )
-        else:
-            want = payload.get(op_name)
+            else:
+                want = payload.get(op_name)
+                if want is not None and new_value != want:
+                    # Special case: BI's `output` write reply is known to echo
+                    # the PRE-write value, but post-camconfig should be correct.
+                    # Any mismatch here is a real failure.
+                    raise BiError(
+                        f"bi_set_camera op={op_name!r} sent {want!r} but post-read "
+                        f"shows {new_value!r}. Change did not land. "
+                        f"(BI footgun: write reply may echo pre-write value; we "
+                        f"verify via a separate camconfig read.)"
+                    )
+    elif op_name in _VERIFY_VIA_CAMLIST:
+        verify_method = "camlist"
+        try:
+            new_value, _row = _verify_camlist(client, camera, op_name)
+        except BiVerifyInconclusive as e:
+            verify_inconclusive = e
+        if verify_inconclusive is None:
+            want = payload.get("rename" if op_name == "rename" else op_name)
+            # For hide/manrec, the camlist field has a different name but the same
+            # truthiness. For rename, payload['rename'] is the new long name and
+            # the verify field is optionDisplay.
             if want is not None and new_value != want:
-                # Special case: BI's `output` write reply is known to echo
-                # the PRE-write value, but post-camconfig should be correct.
-                # Any mismatch here is a real failure.
                 raise BiError(
                     f"bi_set_camera op={op_name!r} sent {want!r} but post-read "
-                    f"shows {new_value!r}. Change did not land. "
-                    f"(BI footgun: write reply may echo pre-write value; we "
-                    f"verify via a separate camconfig read.)"
+                    f"camlist shows {new_value!r} after retry. Change may have "
+                    "been silently rejected by BI (e.g. unique-name collision "
+                    "for rename)."
                 )
-    elif op_name in _VERIFY_VIA_CAMLIST:
-        new_value, _row = _verify_camlist(client, camera, op_name)
-        verify_method = "camlist"
-        want = payload.get("rename" if op_name == "rename" else op_name)
-        # For hide/manrec, the camlist field has a different name but the same
-        # truthiness. For rename, payload['rename'] is the new long name and
-        # the verify field is optionDisplay.
-        if want is not None and new_value != want:
-            raise BiError(
-                f"bi_set_camera op={op_name!r} sent {want!r} but post-read "
-                f"camlist shows {new_value!r} after retry. Change may have "
-                "been silently rejected by BI (e.g. unique-name collision "
-                "for rename)."
-            )
     elif op_name in _VERIFY_VIA_STREAM_DIP:
         # Capture the pre-write online state for the dip detector. The
         # camlist row was captured during the dispatcher's pre-read above.
@@ -1557,13 +1563,23 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
                 "disabled, enable it first; if it's failing to connect, "
                 "investigate the connection rather than retrying reset."
             )
-        dip_info = _verify_stream_dip(
-            client, camera, op_name, pre_isOnline=pre_isOnline
-        )
         verify_method = "isOnline_dip"
+        try:
+            dip_info = _verify_stream_dip(
+                client, camera, op_name, pre_isOnline=pre_isOnline
+            )
+        except BiVerifyInconclusive as e:
+            verify_inconclusive = e
+            dip_info = {"observed_offline_transition": False, "samples": []}
         extras.update(dip_info)
         saw_offline = bool(dip_info.get("observed_offline_transition"))
-        if op_name == "reset":
+        if verify_inconclusive is not None:
+            # Verify-side auth/connectivity blip — we observed nothing useful.
+            # Treat as unverified (verified=False below) rather than fail-closed.
+            # The write itself was accepted; operators wanting confirmation must
+            # poll bi_list_cameras manually.
+            verified_value: bool = False
+        elif op_name == "reset":
             # Defense in depth: pre-check above already refused offline cams,
             # but the dip detector can still miss the transition (e.g. cam
             # cycled too fast, network blip). Fail closed if no True→False
@@ -1577,17 +1593,19 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
                     "was silently ignored. "
                     f"Samples: {dip_info.get('samples')!r}"
                 )
-            verified_value: bool = True
+            verified_value = True
         else:  # reboot
             # Hardware reboot is too slow to fully verify here: BI keeps the
             # stream up for ~T+15s after the cmd is sent, then offline for
             # ~45s, then back online ~T+75s. A 10s sampling window will
             # usually NOT catch the dip. We surface `verified` honestly:
-            # True iff we happened to catch the dip, False otherwise. The
-            # shaper downgrades `ok` to False on `verified=False` so the
-            # caller can't mistake "BI queued the reboot" for "the camera
-            # actually rebooted". Operators wanting hard confirmation must
-            # poll bi_list_cameras through the full ~75s recovery cycle.
+            # True iff we happened to catch the dip, False otherwise.
+            # `ok` stays True (BI accepted the reboot cmd); operators
+            # wanting hard confirmation must poll bi_list_cameras through
+            # the full ~75s recovery cycle. Re-firing a reboot on the
+            # "unverified" signal would mean a second hardware power
+            # cycle, which is why we do NOT surface verify-uncertainty as
+            # ok=False — Codex adversarial review 2026-05-23.
             verified_value = saw_offline
             extras["reboot_verify_note"] = (
                 "Hardware reboot takes ~75s end-to-end (~15s before "
@@ -1600,13 +1618,20 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
     if args.get("raw"):
         return raw
 
-    # `verified` is only meaningful for stream-dip ops; pass None for the
-    # rest so the shaper continues using the "write accepted == ok" contract
-    # used by every other op (each of those already raises BiError on a real
-    # verify mismatch, so reaching the shaper at all means verify passed).
+    # `verified` is meaningful for stream-dip ops always, and for the other
+    # ops only when verify was inconclusive (verify-side auth blip). When
+    # verify ran cleanly on a non-stream-dip op, reaching here means the
+    # mismatch check above passed — leave `verified=None` so the shaper
+    # uses the "write accepted == ok" contract.
     verified_kwarg: bool | None = None
     if op_name in _VERIFY_VIA_STREAM_DIP:
         verified_kwarg = verified_value  # type: ignore[name-defined]
+    elif verify_inconclusive is not None:
+        verified_kwarg = False
+
+    if verify_inconclusive is not None:
+        extras["verify_error_kind"] = verify_inconclusive.kind
+        extras["verify_error"] = str(verify_inconclusive)
 
     return shapers.shape_camera_set_result(
         raw,

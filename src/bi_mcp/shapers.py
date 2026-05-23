@@ -505,23 +505,32 @@ def shape_camera_set_result(
           read), ``"camlist"`` (post-camlist read), ``"isOnline_dip"``
           (reset/reboot — confirmed via stream-transition observation), or
           ``None`` (fire-and-forget; e.g. reboot when verify is skipped).
-      verified: explicit verification status. When ``None`` (default), ``ok``
-          derives from BI's ``result`` only (i.e. the write was accepted).
-          When ``True``, ``ok`` is True iff BI accepted AND verify confirmed.
-          When ``False``, ``ok`` is forced to False — used by `reboot` when
-          the dispatcher couldn't observe the offline transition within its
-          sampling window (the write was accepted but the effect is unproven).
-          ``verified`` is also surfaced in the response so callers can
-          distinguish "write accepted but unproven" from "write accepted and
-          confirmed" without parsing the rest.
+      verified: explicit verification status, surfaced in the response as
+          a separate field from ``ok``. None = verify wasn't run (or
+          succeeded on a non-stream-dip op, where reaching the shaper at
+          all means verify passed). True = post-write read confirmed the
+          change. False = post-write read could not confirm (verify-side
+          blip per ``BiVerifyInconclusive``, or stream-dip not observed
+          within the sampling window). **``verified`` does NOT affect
+          ``ok``.** ``ok`` reflects BI's write-acceptance only; callers
+          must check ``verified`` (and ``verify_error_kind`` when False)
+          to know whether the change is *confirmed* landed. This split
+          exists because some ops (`pause` is additive, `reboot`/`reset`
+          are disruptive) are not safely retryable, so an inconclusive
+          verify must not look like a retry-triggering failure.
       extras: op-specific extras merged into the response (e.g. for pause:
           ``{"seconds_remaining": int, "is_paused": bool}``).
     """
     if not isinstance(raw, dict):
         return {"raw": raw, "ok": False, "op": op, "camera": camera}
     write_accepted = raw.get("result") != "fail"
-    # ok = (BI accepted the write) AND (if a verify outcome was supplied, it succeeded)
-    ok = write_accepted and (verified is not False)
+    # `ok` reflects BI's write acceptance only. Verification certainty lives
+    # entirely in `verified` (and `verify_error_kind` when False). This is
+    # deliberate: see docstring above. Codex adversarial review 2026-05-23
+    # flagged the old `ok = accepted AND verified` shape as a duplicate-
+    # action hazard for non-idempotent ops (pause additive, reboot/reset
+    # disruptive) under transient verify outages.
+    ok = write_accepted
     out: dict[str, Any] = {"ok": ok, "op": op, "camera": camera}
     if not write_accepted:
         data = raw.get("data") if "data" in raw else raw

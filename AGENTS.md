@@ -14,7 +14,7 @@ here. Read this first when entering a fresh session.
 - **Tested against:** Blue Iris **5.9.9.71** (x64) on Windows 10.
 - **Mode:** stdio MCP server. Read-only by default; mutating tools register
   only when `BI_MCP_ALLOW_MUTATIONS=1`.
-- **Surface:** 14 read tools (always) + 4 mutating tools (when enabled).
+- **Surface:** 14 read tools (always) + 6 mutating tools (when enabled).
 
 ---
 
@@ -35,6 +35,7 @@ here. Read this first when entering a fresh session.
 | "Move PTZ to preset N" (requires mutations)                              | `bi_get_ptz_status` first → `bi_set_ptz_preset(...)`     |
 | "Change to night profile" (requires mutations)                           | `bi_get_status` first → `bi_set_profile(...)` → revert   |
 | "Export an MP4 of this alert / clip" (requires mutations + `clipcreate`) | `bi_export_clip(mode="create", path=…, startms=…)` → poll w/ `mode="status"` |
+| "Rename / hide / enable / pause / reboot camera X" (requires mutations)  | `bi_set_camera(camera="…", op="…")` — read op list from tool docstring first |
 
 For static facts (camera → IP, role, friendly name), do **not** call
 `bi_list_cameras` — those are cached in user-level memory at
@@ -66,6 +67,7 @@ For static facts (camera → IP, role, friendly name), do **not** call
 | `bi_set_profile`        | `status` set |   ✓    |     ✓     | Switch active profile                                          |
 | `bi_export_clip`        | `export`     |   ✓    |     ✓     | Async MP4/AVI/WMV export from a clip range (modes: create / status / list). Requires BI user `clipcreate=true` |
 | `bi_update_record`      | `update`     |        |     ✓     | Set memo (≤35 chars) and/or flag bits (flagged/protected/archive/export_flag) on one alert or clip @record. Read-before-write captures previous_memo + previous_flags |
+| `bi_set_camera`         | `camconfig`  |   ✓    |     ✓     | 10 ops: rename, hide, enable, audio, output, manrec, pause, profile+lock, reset (stream reload), reboot. All verify post-write; reset/reboot have extended verify windows. |
 
 Every tool accepts `raw=true` — returns the underlying BI payload verbatim
 instead of the shaped view. Use it when shaping might be hiding a field
@@ -217,7 +219,8 @@ zones against AI rules, this offset must be applied.
 
 ## Mutation patterns
 
-Mutating tools (`bi_trigger_camera`, `bi_set_ptz_preset`, `bi_set_profile`)
+Mutating tools (`bi_trigger_camera`, `bi_set_ptz_preset`, `bi_set_profile`,
+`bi_export_clip`, `bi_update_record`, `bi_set_camera`)
 are registered only when `BI_MCP_ALLOW_MUTATIONS=1`. The rules below apply
 whenever you reach for any of them.
 
@@ -249,6 +252,26 @@ For `bi_trigger_camera`:
 bi_trigger_camera(camera="SecCam_3", memo="test-low-light")
 bi_list_alerts(camera="SecCam_3", limit=1)  → memo should appear
 ```
+
+**For `bi_set_camera`** the response also carries a `verified` field
+(plus `verify_method` and, when verify couldn't complete, a
+`verify_error_kind`):
+
+| `ok`  | `verified` | Meaning | Action |
+|-------|------------|---------|--------|
+| true  | true       | BI accepted AND post-read confirmed the change | Done |
+| true  | false      | BI accepted but post-read couldn't confirm (verify-side blip, or stream-dip not seen for reboot/reset) | Re-read state manually; do NOT blindly retry — some ops are not idempotent (`pause` is additive, `reboot`/`reset` are disruptive) |
+| true  | omitted    | BI accepted; this op verifies via the response itself (no post-read needed) | Done |
+| false | —          | BI rejected the write | Read `reason` and decide |
+
+When `verified=false`, look at `verify_error_kind`:
+
+- `verify_auth_blip` — fresh admin login failed. **If this recurs across
+  calls, investigate `BI_ADMIN_USER`/`BI_ADMIN_PASS`** (rotation,
+  lockout) rather than treating as transient.
+- `verify_unreachable` — network blip / BI restart. Almost always
+  transient; one retry is usually fine, but still re-read first to avoid
+  duplicating non-idempotent side effects.
 
 ### Rule 3 — Revert global state before turn end
 
@@ -367,6 +390,16 @@ isn't active, post-write drift in `protected` / `archive` /
 `export_flag` raises `BiError` rather than silently returning success.
 This protects against future BI builds that might mutate additional
 flag bits we haven't characterized.
+
+### Rule 8 — `bi_set_camera` op-specific gotchas
+
+- **output**: the BI reply echoes the *pre-write* value, not the new one. The tool re-reads `bi_get_camera_config` to verify — do not interpret the raw reply value as the post-write state.
+- **audio**: toggling audio restarts the camera's stream (~1-2s reconnect lag). Don't follow immediately with a state-sensitive read.
+- **profile+lock (op="profile")**: setting `profile=-1` on an *enabled* camera is silently coerced to 0 (scheduled) by BI. Only works as "hold at -1" on a *disabled* camera. Verify the post-write value rather than assuming the requested profile landed.
+- **pause**: pause codes are *additive* (bitmask). Probe with `bi_get_camera_config` to see the current `pause` value before setting, or you may clear a pause set by a different caller.
+- **reset**: this is a *stream reload*, NOT a counter or alert reset. Use it only when a camera feed is stuck. Tool refuses upfront if camera is offline.
+- **reboot**: end-to-end ~75s on this install (10s for BI to mark offline + ~65s for the camera to return). The verify window is only 10s, so `{ok: true, verified: false}` in the response is expected and normal — BI accepted the reboot cmd, the dip just happened outside the sampling window. **Do NOT re-fire the cmd on `verified: false`** (that would mean a second hardware power cycle). Poll `bi_list_cameras` until `isOnline` cycles false→true to confirm.
+- **All ops require admin**: `bi_set_camera` always routes through the admin client. `BI_ADMIN_USER` and `BI_ADMIN_PASS` must be set.
 
 ### Rule 6 — `bi_export_clip` needs the `clipcreate` user permission
 
