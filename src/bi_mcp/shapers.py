@@ -474,6 +474,73 @@ def shape_update_record_result(
     return out
 
 
+def shape_camera_set_result(
+    raw: Any,
+    *,
+    op: str,
+    camera: str,
+    previous: Any = None,
+    new: Any = None,
+    verify_method: str | None = None,
+    verified: bool | None = None,
+    extras: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Shape the response from ``bi_set_camera`` (wraps BI ``camconfig`` set-half).
+
+    Pattern mirrors :func:`shape_update_record_result`: the tool runs a
+    pre-read, write, post-read flow and hands this shaper everything needed
+    for an ergonomic response. The shaper itself does no I/O.
+
+    Args:
+      raw: the raw BI ``camconfig`` set reply (``{result, session, data}``).
+      op: the op name from the tool layer (``"rename"``, ``"hide"``,
+          ``"enable"``, ``"audio"``, ``"output"``, ``"manrec"``, ``"pause"``,
+          ``"profile_lock"``, ``"reset"``, ``"reboot"``).
+      camera: the target camera short name.
+      previous: the pre-write value (op-specific shape; e.g. a string for
+          rename, a bool for hide, ``{"profile": int, "lock": int}`` for
+          profile_lock).
+      new: the verified post-write value (same shape as ``previous``).
+      verify_method: one of ``"camconfig"`` (write reply or post-camconfig
+          read), ``"camlist"`` (post-camlist read), ``"isOnline_dip"``
+          (reset/reboot — confirmed via stream-transition observation), or
+          ``None`` (fire-and-forget; e.g. reboot when verify is skipped).
+      verified: explicit verification status. When ``None`` (default), ``ok``
+          derives from BI's ``result`` only (i.e. the write was accepted).
+          When ``True``, ``ok`` is True iff BI accepted AND verify confirmed.
+          When ``False``, ``ok`` is forced to False — used by `reboot` when
+          the dispatcher couldn't observe the offline transition within its
+          sampling window (the write was accepted but the effect is unproven).
+          ``verified`` is also surfaced in the response so callers can
+          distinguish "write accepted but unproven" from "write accepted and
+          confirmed" without parsing the rest.
+      extras: op-specific extras merged into the response (e.g. for pause:
+          ``{"seconds_remaining": int, "is_paused": bool}``).
+    """
+    if not isinstance(raw, dict):
+        return {"raw": raw, "ok": False, "op": op, "camera": camera}
+    write_accepted = raw.get("result") != "fail"
+    # ok = (BI accepted the write) AND (if a verify outcome was supplied, it succeeded)
+    ok = write_accepted and (verified is not False)
+    out: dict[str, Any] = {"ok": ok, "op": op, "camera": camera}
+    if not write_accepted:
+        data = raw.get("data") if "data" in raw else raw
+        reason = data.get("reason") if isinstance(data, dict) else None
+        out["reason"] = reason or raw.get("result") or "unknown"
+        return out
+    if verified is not None:
+        out["verified"] = verified
+    if previous is not None:
+        out["previous"] = previous
+    if new is not None:
+        out["new"] = new
+    if verify_method is not None:
+        out["verify_method"] = verify_method
+    if extras:
+        out.update(extras)
+    return out
+
+
 def shape_reg(parsed: dict[str, Any], camera_short: str, mtime_age_days: float) -> dict[str, Any]:
     """Shape the parsed .reg hive output.
 

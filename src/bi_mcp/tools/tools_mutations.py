@@ -971,6 +971,656 @@ def _tool_update_record(client: BiClients, args: dict) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# bi_set_camera — wrap BI `camconfig` set-half
+# ---------------------------------------------------------------------------
+
+
+# Per-field semantics established by live probes 2026-05-22 against BI 5.9.9.71.
+# Full table + cross-cutting rules in the auto-memory file
+# ``reference_camconfig_set_half_semantics.md``. Read that before changing this
+# tool — several fields have non-obvious behavior (output reply echoes the
+# PRE-write value, rename has same-session camlist staleness, pause codes are
+# additive, reset is a stream-reload not a counter-reset, etc.).
+
+# Pause input: BI accepts integer codes -1..10 (manual § *camconfig*). For
+# ergonomics we also accept named strings — same shape as bi_set_profile.
+# Names chosen to be short and unambiguous. The numeric code BI expects on the
+# wire is the int on the right.
+_PAUSE_NAMES: dict[str, int] = {
+    "off": 0,
+    "indefinite": -1,
+    "30s": 1,
+    "5m": 2,
+    "30m": 3,
+    "1h": 4,
+    "2h": 5,
+    "3h": 6,
+    "5h": 7,
+    "10h": 8,
+    "24h": 9,
+    "15m": 10,
+}
+
+# Ops whose only meaningful value is `true` — sending `false` makes no sense
+# (you cannot "un-reboot"). The tool refuses `false` explicitly so a caller
+# doesn't accidentally get a no-op success.
+_TRUE_ONLY_OPS = frozenset({"reset", "reboot"})
+
+# The 10 op-key set — anything outside this is an unknown op. JSON-schema
+# additionalProperties:false catches typos at the protocol layer, but this
+# constant is the authoritative tool-side enumeration.
+_OP_KEYS: frozenset[str] = frozenset({
+    "rename", "hide", "enable", "audio", "output", "manrec", "pause",
+    "profile", "lock", "reset", "reboot",
+})
+
+# Ops verified via re-reading `camconfig` (BI's authoritative config snapshot).
+# These fields are present in the camconfig reply AND propagate synchronously.
+_VERIFY_VIA_CAMCONFIG: frozenset[str] = frozenset({
+    "enable", "audio", "output", "profile_lock", "pause",
+})
+
+# Ops verified via `camlist` (the only read channel that exposes them).
+# rename: optionDisplay (async ~2-3s; same-session staleness)
+# hide: hidden (sync)
+# manrec: isManRec (sync)
+_VERIFY_VIA_CAMLIST: frozenset[str] = frozenset({"rename", "hide", "manrec"})
+
+# Ops verified by observing the camera stream transition (isOnline dip / FPS
+# drop). `reset` reloads the stream (~5s); `reboot` reboots the hardware
+# (~75s). Verify is best-effort here — we sample camlist briefly and surface
+# what we observed.
+_VERIFY_VIA_STREAM_DIP: frozenset[str] = frozenset({"reset", "reboot"})
+
+# Write-side op name → read-side key in the camconfig reply. Most ops are
+# symmetric (write 'audio' → read 'audio'). The exception is `enable`: BI
+# accepts `enable` on the write but returns the state under `enabled` on
+# the read. Phase 0 confirmed this is the only asymmetry among the camconfig-
+# verified ops; the rest (audio, output, pause) match write↔read.
+_CAMCONFIG_READ_KEY: dict[str, str] = {"enable": "enabled"}
+
+
+def _coerce_pause(value: Any) -> int:
+    """Accept BI pause code (int -1..10) or named string, return the int code.
+
+    Raises BiBadRequest on invalid input.
+    """
+    if isinstance(value, bool):
+        # bool is a subclass of int in Python — refuse it explicitly so
+        # `pause=True` doesn't quietly become pause=1 (add 30s).
+        raise BiBadRequest(
+            f"'pause' must be an int code -1..10 or a name "
+            f"({'/'.join(_PAUSE_NAMES)}); got bool {value!r}"
+        )
+    if isinstance(value, int):
+        if not (-1 <= value <= 10):
+            raise BiBadRequest(
+                f"'pause' int must be -1..10 (got {value}). "
+                "Per BI manual: -1=indefinite, 0=off, 1=add30s, 2=add5m, "
+                "3=add30m, 4=add1h, 5=add2h, 6=add3h, 7=add5h, 8=add10h, "
+                "9=add24h, 10=add15m. NOTE: codes 1..10 are ADDITIVE — calling "
+                "the same code twice extends the pause, doesn't replace it."
+            )
+        return value
+    if isinstance(value, str):
+        if value not in _PAUSE_NAMES:
+            raise BiBadRequest(
+                f"'pause' name {value!r} not recognized. "
+                f"Valid names: {', '.join(_PAUSE_NAMES)}. Or pass an int -1..10."
+            )
+        return _PAUSE_NAMES[value]
+    raise BiBadRequest(
+        f"'pause' must be an int code -1..10 or a name string "
+        f"(got {type(value).__name__})"
+    )
+
+
+def _pick_op(args: dict) -> tuple[str, dict[str, Any]]:
+    """Validate args, return ``(op_name, write_payload_excluding_camera)``.
+
+    Enforces:
+      * camera is present and non-empty
+      * exactly one op is specified (``profile`` + ``lock`` count as one)
+      * ``lock`` is only valid with ``profile``
+      * ``reset`` / ``reboot`` are only valid as ``true``
+      * pause is coerced via _coerce_pause
+
+    Returns the op name (used by the verify dispatcher and the shaper) and
+    the BI-side payload to send (minus the ``camera`` key, which the caller
+    adds).
+    """
+    mutation_keys = [k for k in args if k in _OP_KEYS]
+    if not mutation_keys:
+        raise BiBadRequest(
+            f"bi_set_camera requires exactly one mutation op. Pass one of: "
+            f"{', '.join(sorted(_OP_KEYS - {'lock'}))} (pair `lock` with `profile`)."
+        )
+
+    has_profile = "profile" in mutation_keys
+    has_lock = "lock" in mutation_keys
+    if has_lock and not has_profile:
+        raise BiBadRequest(
+            "bi_set_camera: 'lock' is only valid when paired with 'profile'. "
+            "Per-camera profile override needs the profile value; 'lock' is a "
+            "modifier that holds the profile across schedule changes."
+        )
+
+    # profile + lock together = one op for the one-mutation rule.
+    op_count_keys = [k for k in mutation_keys if k != "lock"]
+    if len(op_count_keys) > 1:
+        raise BiBadRequest(
+            f"bi_set_camera accepts one mutation per call (got {sorted(op_count_keys)}). "
+            "Profile+lock counts as one op; everything else is independent. "
+            "Rationale: the 10 ops are semantically unrelated and bundling them "
+            "would obscure verify-after-write."
+        )
+
+    op_key = op_count_keys[0]
+
+    # Validate true-only ops.
+    if op_key in _TRUE_ONLY_OPS and args[op_key] is not True:
+        raise BiBadRequest(
+            f"bi_set_camera: '{op_key}' only accepts true (got {args[op_key]!r}). "
+            f"There is no '{op_key}=false' semantic in BI."
+        )
+
+    # Build payload (BI-side keys only; camera added by caller).
+    payload: dict[str, Any] = {}
+    if op_key == "rename":
+        value = args["rename"]
+        if not isinstance(value, str) or not value:
+            raise BiBadRequest(
+                f"'rename' must be a non-empty string (got {value!r})"
+            )
+        payload["rename"] = value
+        op_name = "rename"
+    elif op_key == "hide":
+        if not isinstance(args["hide"], bool):
+            raise BiBadRequest(
+                f"'hide' must be a boolean (got {type(args['hide']).__name__})"
+            )
+        payload["hide"] = args["hide"]
+        op_name = "hide"
+    elif op_key == "enable":
+        if not isinstance(args["enable"], bool):
+            raise BiBadRequest(
+                f"'enable' must be a boolean (got {type(args['enable']).__name__})"
+            )
+        payload["enable"] = args["enable"]
+        op_name = "enable"
+    elif op_key == "audio":
+        if not isinstance(args["audio"], bool):
+            raise BiBadRequest(
+                f"'audio' must be a boolean (got {type(args['audio']).__name__})"
+            )
+        payload["audio"] = args["audio"]
+        op_name = "audio"
+    elif op_key == "output":
+        if not isinstance(args["output"], bool):
+            raise BiBadRequest(
+                f"'output' must be a boolean (got {type(args['output']).__name__})"
+            )
+        payload["output"] = args["output"]
+        op_name = "output"
+    elif op_key == "manrec":
+        if not isinstance(args["manrec"], bool):
+            raise BiBadRequest(
+                f"'manrec' must be a boolean (got {type(args['manrec']).__name__})"
+            )
+        payload["manrec"] = args["manrec"]
+        op_name = "manrec"
+    elif op_key == "pause":
+        payload["pause"] = _coerce_pause(args["pause"])
+        op_name = "pause"
+    elif op_key == "profile":
+        try:
+            profile_int = int(args["profile"])
+        except (TypeError, ValueError) as e:
+            raise BiBadRequest(
+                f"'profile' must be an integer -1..7 (got {args['profile']!r})"
+            ) from e
+        if not (-1 <= profile_int <= 7):
+            raise BiBadRequest(
+                f"'profile' must be in -1..7 (got {profile_int}). NOTE: "
+                "profile=-1 is silently coerced to the current global profile "
+                "on an enabled camera; the only reliable way to clear an "
+                "override is via enable=false."
+            )
+        payload["profile"] = profile_int
+        if has_lock:
+            if not isinstance(args["lock"], bool):
+                raise BiBadRequest(
+                    f"'lock' must be a boolean (got {type(args['lock']).__name__})"
+                )
+            payload["lock"] = args["lock"]
+        op_name = "profile_lock"
+    elif op_key in ("reset", "reboot"):
+        # _TRUE_ONLY_OPS guard already ran.
+        payload[op_key] = True
+        op_name = op_key
+    else:
+        # Unreachable — _OP_KEYS would have filtered it.
+        raise BiBadRequest(f"bi_set_camera: unknown op {op_key!r}")
+
+    return op_name, payload
+
+
+def _verify_camconfig(
+    client: BiClients, camera: str, op_name: str, payload: dict[str, Any]
+) -> tuple[Any, dict[str, Any]]:
+    """Verify-via-camconfig path. Returns (new_value, full_camconfig_data).
+
+    Used for: enable, audio, output, profile_lock, pause. All of these are
+    fields BI exposes in the camconfig read reply.
+
+    Phase 0 finding: in BI 5.9.9.71 the session that issued the camconfig
+    write can read back stale values for several fields (output, audio in
+    some cases). The same fresh-login + retry pattern that defeats
+    camlist staleness for rename also defeats camconfig staleness here.
+    Without this, output revert (and similar) will spuriously fail verify
+    even though the BI side committed the change.
+    """
+    import time
+
+    delays = (0.0, 1.0, 2.0)  # ~3s total — enough for in-session staleness to clear
+    last_post: dict[str, Any] | None = None
+    last_value: Any = None
+    for delay in delays:
+        if delay > 0:
+            time.sleep(delay)
+        admin = client.resolve_admin()
+        if admin is not None:
+            admin.session = None
+        post = client.admin_call("camconfig", camera=camera)
+        if not isinstance(post, dict):
+            continue
+        last_post = post
+        if op_name == "profile_lock":
+            actual_profile = post.get("profile")
+            actual_lock_raw = post.get("lock")
+            try:
+                actual_lock = int(actual_lock_raw) if actual_lock_raw is not None else None
+            except (TypeError, ValueError):
+                actual_lock = None
+            last_value = {"profile": actual_profile, "lock": actual_lock}
+        else:
+            read_key = _CAMCONFIG_READ_KEY.get(op_name, op_name)
+            last_value = post.get(read_key)
+    if last_post is None:
+        raise BiError(
+            f"bi_set_camera verify: camconfig post-read returned non-dict "
+            f"after retries. Cannot confirm op={op_name!r} landed."
+        )
+    return last_value, last_post
+
+
+def _verify_camlist(
+    client: BiClients, camera: str, op_name: str
+) -> tuple[Any, dict[str, Any] | None]:
+    """Verify-via-camlist path with retry for async-propagation fields.
+
+    Returns ``(new_value, camlist_row)`` or ``(None, None)`` if the camera
+    can't be found in camlist. The retry budget mirrors the Phase 0
+    observations: rename has ~2-3s propagation, hide/manrec are sync but the
+    extra polls cost nothing.
+
+    Uses a fresh admin login on each poll to defeat the same-session camlist
+    staleness observed for `rename` and `enable` writes — see the semantics
+    memory.
+    """
+    import time
+
+    target_field = {
+        "rename": "optionDisplay",
+        "hide": "hidden",
+        "manrec": "isManRec",
+    }.get(op_name)
+    if target_field is None:
+        raise BiError(
+            f"bi_set_camera internal: _verify_camlist called with unhandled "
+            f"op={op_name!r}"
+        )
+
+    delays = (0.0, 1.0, 2.0, 3.0)  # ~6s total budget — covers the ~2-3s rename lag
+    last_row: dict[str, Any] | None = None
+    last_value: Any = None
+    for delay in delays:
+        if delay > 0:
+            time.sleep(delay)
+        # Force a fresh admin login by clearing the session, so we get a
+        # camlist read uncached by the write-side staleness pattern.
+        admin = client.resolve_admin()
+        if admin is not None:
+            admin.session = None
+        raw = client.admin_call("camlist")
+        if not isinstance(raw, list):
+            continue
+        for cam in raw:
+            if isinstance(cam, dict) and cam.get("optionValue") == camera:
+                last_row = cam
+                last_value = cam.get(target_field)
+                break
+        # We don't break on a "correct" value because the caller still wants
+        # to see what we landed on, not just a yes/no. The dispatcher's
+        # mismatch check below will decide.
+    return last_value, last_row
+
+
+def _verify_stream_dip(
+    client: BiClients,
+    camera: str,
+    op_name: str,
+    *,
+    pre_isOnline: bool | None,
+) -> dict[str, Any]:
+    """Verify-via-stream-transition path for reset/reboot.
+
+    Returns ``{observed_offline_transition: bool, samples: [...]}``.
+
+    ``observed_offline_transition`` is True only when a True→False transition
+    is observed in the (pre-baseline + sampled) timeline. A cam that started
+    offline and stayed offline does NOT count — there's no transition to
+    detect. This guards against false positives when reset is fired against
+    a cam that's already disconnected (the dispatcher refuses that case
+    upfront, but this defense-in-depth check matters if the cam goes
+    transient-offline between the pre-read and the write).
+
+    For ``reset``: a clean reset reliably produces a True→False dip within
+    the sampling window (~10s, Phase 0 saw the dip at ~T+1..3s and recovery
+    at ~T+4..6s).
+    For ``reboot``: the ~75s hardware reboot cycle won't drop isOnline until
+    ~T+15s, so the 10s window usually MISSES the transition. The dispatcher
+    treats that as ``verified=False`` (write accepted, effect unproven) and
+    downgrades ``ok`` accordingly — see the dispatcher's reboot branch.
+    """
+    import time
+
+    budget_s = 10.0
+    interval_s = 1.5
+    deadline = time.monotonic() + budget_s
+    samples: list[dict[str, Any]] = []
+    # Treat the pre-write isOnline as an implicit first sample so a fast
+    # transition (cam offline by the time of our first sample) still counts.
+    last_online: bool | None = pre_isOnline
+    saw_transition = False
+    while time.monotonic() < deadline:
+        admin = client.resolve_admin()
+        if admin is not None:
+            admin.session = None
+        raw = client.admin_call("camlist")
+        if isinstance(raw, list):
+            for cam in raw:
+                if isinstance(cam, dict) and cam.get("optionValue") == camera:
+                    current_online = cam.get("isOnline")
+                    sample = {
+                        "isOnline": current_online,
+                        "FPS": cam.get("FPS"),
+                        "error": cam.get("error"),
+                    }
+                    samples.append(sample)
+                    if (
+                        last_online is True
+                        and current_online is False
+                    ):
+                        saw_transition = True
+                    last_online = current_online
+                    break
+        time.sleep(interval_s)
+    return {"observed_offline_transition": saw_transition, "samples": samples}
+
+
+@log_tool_usage("bi_set_camera")
+def _tool_set_camera(client: BiClients, args: dict) -> Any:
+    _require_mutations()
+
+    camera = args.get("camera")
+    if not camera or not isinstance(camera, str):
+        raise BiBadRequest(
+            "bi_set_camera requires a non-empty 'camera' argument (camera short name)"
+        )
+
+    op_name, payload = _pick_op(args)
+
+    # camconfig set-half is admin-gated. Refuse early if no admin is configured.
+    if client.resolve_admin() is None:
+        from ..errors import BiAdminRequired
+        raise BiAdminRequired(
+            "bi_set_camera requires admin Blue Iris credentials; the `camconfig` "
+            "set-half is admin-gated. Set BI_ADMIN_USER/BI_ADMIN_PASS in "
+            "bi-mcp/.env, or grant admin to BI_USER."
+        )
+
+    # ----- Pre-read --------------------------------------------------------
+    # For ops whose verify channel is camconfig (or where the previous value
+    # is one of the camconfig-exposed fields), pre-read camconfig to capture
+    # the previous value. For ops whose previous value lives only in camlist
+    # (rename, hide, manrec), pre-read camlist.
+    previous: Any = None
+    pre_camconfig: dict[str, Any] | None = None
+    pre_camlist_row: dict[str, Any] | None = None
+    try:
+        if op_name in _VERIFY_VIA_CAMCONFIG:
+            raw_pre = client.admin_call("camconfig", camera=camera)
+            if isinstance(raw_pre, dict):
+                pre_camconfig = raw_pre
+                if op_name == "profile_lock":
+                    pre_lock_raw = raw_pre.get("lock")
+                    try:
+                        pre_lock = int(pre_lock_raw) if pre_lock_raw is not None else None
+                    except (TypeError, ValueError):
+                        pre_lock = None
+                    previous = {"profile": raw_pre.get("profile"), "lock": pre_lock}
+                else:
+                    pre_read_key = _CAMCONFIG_READ_KEY.get(op_name, op_name)
+                    previous = raw_pre.get(pre_read_key)
+        elif op_name in _VERIFY_VIA_CAMLIST:
+            raw_pre = client.admin_call("camlist")
+            if isinstance(raw_pre, list):
+                for cam in raw_pre:
+                    if isinstance(cam, dict) and cam.get("optionValue") == camera:
+                        pre_camlist_row = cam
+                        target_field = {
+                            "rename": "optionDisplay",
+                            "hide": "hidden",
+                            "manrec": "isManRec",
+                        }[op_name]
+                        previous = cam.get(target_field)
+                        break
+                if pre_camlist_row is None:
+                    raise BiBadRequest(
+                        f"bi_set_camera: camera {camera!r} not found in camlist. "
+                        "Use bi_list_cameras to verify the short name."
+                    )
+        else:
+            # reset / reboot — no meaningful "previous" value to capture for
+            # revert (you can't un-reset). Pre-read camlist anyway so we know
+            # the cam exists and is reachable.
+            raw_pre = client.admin_call("camlist")
+            if isinstance(raw_pre, list):
+                for cam in raw_pre:
+                    if isinstance(cam, dict) and cam.get("optionValue") == camera:
+                        pre_camlist_row = cam
+                        break
+                if pre_camlist_row is None:
+                    raise BiBadRequest(
+                        f"bi_set_camera: camera {camera!r} not found in camlist."
+                    )
+    except BiBadRequest:
+        raise
+    except BiError as e:
+        raise BiError(
+            f"bi_set_camera pre-read failed for op={op_name!r} on camera "
+            f"{camera!r}: {e}"
+        ) from e
+
+    # ----- Write -----------------------------------------------------------
+    raw = client.admin_call_raw("camconfig", camera=camera, **payload)
+    if raw.get("result") == "fail":
+        data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        reason = data.get("reason") or "unknown"
+        raise BiError(
+            f"bi_set_camera op={op_name!r} on {camera!r} failed: {reason}"
+        )
+
+    # ----- Verify-after-write ---------------------------------------------
+    new_value: Any = None
+    verify_method: str | None = None
+    extras: dict[str, Any] = {}
+    if op_name in _VERIFY_VIA_CAMCONFIG:
+        new_value, _post = _verify_camconfig(client, camera, op_name, payload)
+        verify_method = "camconfig"
+        # Per-op verification of landing.
+        if op_name == "profile_lock":
+            want_profile = payload.get("profile")
+            want_lock = payload.get("lock")
+            got_profile = new_value.get("profile") if isinstance(new_value, dict) else None
+            got_lock = new_value.get("lock") if isinstance(new_value, dict) else None
+            if want_profile is not None and got_profile != want_profile:
+                # Document the known BI quirk: profile=-1 on an enabled cam
+                # silently coerces to the current global. Surface a more
+                # useful error than a generic mismatch.
+                if want_profile == -1:
+                    raise BiError(
+                        f"bi_set_camera profile=-1 was rejected by BI: "
+                        f"post-read shows profile={got_profile!r} (likely the "
+                        "current global). On an enabled camera, BI silently "
+                        "coerces profile=-1 to the global profile. To clear "
+                        "the per-camera override, call enable=false (which "
+                        "auto-resets profile to -1) then enable=true."
+                    )
+                raise BiError(
+                    f"bi_set_camera sent profile={want_profile} but post-read "
+                    f"shows profile={got_profile!r}. Change did not land."
+                )
+            if want_lock is not None and got_lock != int(want_lock):
+                raise BiError(
+                    f"bi_set_camera sent lock={want_lock} but post-read "
+                    f"shows lock={got_lock!r}."
+                )
+        elif op_name == "pause":
+            # pause write reply echoes seconds remaining; post-read camconfig
+            # shows the same. The relationship between the input code and the
+            # output seconds is BI-internal, so we don't enforce equality.
+            # We do flag the additive-pause behavior in the response so the
+            # caller knows what landed.
+            extras["pause_seconds_remaining"] = new_value
+            extras["pause_additive_note"] = (
+                "BI pause codes 1..10 are additive — calling the same code "
+                "twice extends, doesn't replace. Send pause=0 to cancel."
+            )
+        else:
+            want = payload.get(op_name)
+            if want is not None and new_value != want:
+                # Special case: BI's `output` write reply is known to echo
+                # the PRE-write value, but post-camconfig should be correct.
+                # Any mismatch here is a real failure.
+                raise BiError(
+                    f"bi_set_camera op={op_name!r} sent {want!r} but post-read "
+                    f"shows {new_value!r}. Change did not land. "
+                    f"(BI footgun: write reply may echo pre-write value; we "
+                    f"verify via a separate camconfig read.)"
+                )
+    elif op_name in _VERIFY_VIA_CAMLIST:
+        new_value, _row = _verify_camlist(client, camera, op_name)
+        verify_method = "camlist"
+        want = payload.get("rename" if op_name == "rename" else op_name)
+        # For hide/manrec, the camlist field has a different name but the same
+        # truthiness. For rename, payload['rename'] is the new long name and
+        # the verify field is optionDisplay.
+        if want is not None and new_value != want:
+            raise BiError(
+                f"bi_set_camera op={op_name!r} sent {want!r} but post-read "
+                f"camlist shows {new_value!r} after retry. Change may have "
+                "been silently rejected by BI (e.g. unique-name collision "
+                "for rename)."
+            )
+    elif op_name in _VERIFY_VIA_STREAM_DIP:
+        # Capture the pre-write online state for the dip detector. The
+        # camlist row was captured during the dispatcher's pre-read above.
+        pre_isOnline = (
+            bool(pre_camlist_row.get("isOnline"))
+            if isinstance(pre_camlist_row, dict) and pre_camlist_row.get("isOnline") is not None
+            else None
+        )
+        # For `reset`: refuse upfront if the cam isn't streaming. A clean
+        # reset means "drop+reopen the BI→camera connection"; there's
+        # nothing to drop if the cam is already offline, and `_verify_stream_dip`
+        # cannot observe a True→False transition that never existed. Codex
+        # adversarial review (2026-05-22) flagged this as a false-positive
+        # path. Refusing pre-write is cleaner than firing-and-failing-verify.
+        if op_name == "reset" and pre_isOnline is not True:
+            raise BiBadRequest(
+                f"bi_set_camera reset on {camera!r} refused: camera is not "
+                f"currently online (pre-read isOnline={pre_isOnline!r}). "
+                "Reset reloads a live stream — fire it only on a camera "
+                "that is online. If the camera is offline because it's "
+                "disabled, enable it first; if it's failing to connect, "
+                "investigate the connection rather than retrying reset."
+            )
+        dip_info = _verify_stream_dip(
+            client, camera, op_name, pre_isOnline=pre_isOnline
+        )
+        verify_method = "isOnline_dip"
+        extras.update(dip_info)
+        saw_offline = bool(dip_info.get("observed_offline_transition"))
+        if op_name == "reset":
+            # Defense in depth: pre-check above already refused offline cams,
+            # but the dip detector can still miss the transition (e.g. cam
+            # cycled too fast, network blip). Fail closed if no True→False
+            # transition seen.
+            if not saw_offline:
+                raise BiError(
+                    f"bi_set_camera reset on {camera!r}: BI accepted the cmd "
+                    "but no isOnline True→False transition was observed in "
+                    "the sampling window (~10s). A successful reset always "
+                    "produces a brief stream dip; absence implies the cmd "
+                    "was silently ignored. "
+                    f"Samples: {dip_info.get('samples')!r}"
+                )
+            verified_value: bool = True
+        else:  # reboot
+            # Hardware reboot is too slow to fully verify here: BI keeps the
+            # stream up for ~T+15s after the cmd is sent, then offline for
+            # ~45s, then back online ~T+75s. A 10s sampling window will
+            # usually NOT catch the dip. We surface `verified` honestly:
+            # True iff we happened to catch the dip, False otherwise. The
+            # shaper downgrades `ok` to False on `verified=False` so the
+            # caller can't mistake "BI queued the reboot" for "the camera
+            # actually rebooted". Operators wanting hard confirmation must
+            # poll bi_list_cameras through the full ~75s recovery cycle.
+            verified_value = saw_offline
+            extras["reboot_verify_note"] = (
+                "Hardware reboot takes ~75s end-to-end (~15s before "
+                "isOnline drops, ~45s offline, ~15s recovery). Our 10s "
+                "sampling window usually MISSES the dip — `verified` will "
+                "often be false even on a successful reboot. To confirm, "
+                "poll bi_list_cameras until isOnline cycles false→true."
+            )
+
+    if args.get("raw"):
+        return raw
+
+    # `verified` is only meaningful for stream-dip ops; pass None for the
+    # rest so the shaper continues using the "write accepted == ok" contract
+    # used by every other op (each of those already raises BiError on a real
+    # verify mismatch, so reaching the shaper at all means verify passed).
+    verified_kwarg: bool | None = None
+    if op_name in _VERIFY_VIA_STREAM_DIP:
+        verified_kwarg = verified_value  # type: ignore[name-defined]
+
+    return shapers.shape_camera_set_result(
+        raw,
+        op=op_name,
+        camera=camera,
+        previous=previous,
+        new=new_value,
+        verify_method=verify_method,
+        verified=verified_kwarg,
+        extras=extras,
+    )
+
+
+# ---------------------------------------------------------------------------
 # registration
 # ---------------------------------------------------------------------------
 
@@ -1254,5 +1904,127 @@ def register() -> None:
             "destructiveHint": False,
             "idempotentHint": True,
             "title": "Update BI record memo/flags",
+        },
+    )
+
+    register_tool(
+        "bi_set_camera",
+        _tool_set_camera,
+        description=(
+            "Wrap BI `camconfig` set-half (manual § *camconfig*). Per-camera "
+            "troubleshooting / state ops. Pass `camera` plus exactly ONE of: "
+            "`rename` (long name), `hide` (bool), `enable` (bool), `audio` "
+            "(bool, audio processing), `output` (bool, first DIO), `manrec` "
+            "(bool, start/stop manual recording), `pause` (int -1..10 or name "
+            "'off'/'indefinite'/'30s'/'5m'/'15m'/'30m'/'1h'/'2h'/'3h'/'5h'/"
+            "'10h'/'24h'), `profile` (-1..7 per-camera override; pair with "
+            "optional `lock` to hold across schedule changes), `reset` "
+            "(true=force stream reload; NOT a counter reset), or `reboot` "
+            "(true=hardware reboot, ~75s outage). Profile+lock count as one "
+            "op; all others are mutually exclusive. "
+            "Mandatory pre-read captures `previous` so callers can revert. "
+            "Mandatory post-read verifies the change actually landed — per "
+            "op via either camconfig (enable/audio/output/profile_lock/pause) "
+            "or camlist (rename/hide/manrec) or stream-transition sampling "
+            "(reset/reboot). "
+            "**Footguns**: (1) BI silently accepts unknown camconfig fields "
+            "and ignores them — schema enforces `additionalProperties:false` "
+            "to catch typos. (2) `output` write reply echoes the PRE-write "
+            "value; verify uses a separate camconfig read. (3) `rename` "
+            "propagates async ~2-3s; verify includes retry. (4) `pause` "
+            "codes 1..10 are ADDITIVE — same code twice extends, doesn't "
+            "replace; use pause=0 to cancel. (5) `profile=-1` on an enabled "
+            "camera is silently coerced to the current global; the only "
+            "reliable way to clear a per-camera override is `enable=false` "
+            "(which auto-resets profile to -1). (6) `reboot` verify samples "
+            "only ~10s; full settle takes ~75s — poll bi_list_cameras manually. "
+            "REVERT changes before turn end unless the user asked for "
+            "persistence. Requires BI_MCP_ALLOW_MUTATIONS=1."
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                **COMMON_SCHEMA,
+                "camera": {
+                    "type": "string",
+                    "description": "Camera short name (e.g. 'SecCam_3'). Required.",
+                },
+                "rename": {
+                    "type": "string",
+                    "description": "Change camera long name. Verified via camlist.optionDisplay; async ~2-3s.",
+                },
+                "hide": {
+                    "type": "boolean",
+                    "description": "Hide camera from view. Sync, no stream impact.",
+                },
+                "enable": {
+                    "type": "boolean",
+                    "description": "Enable/disable the camera entirely. Disable auto-resets per-camera profile to -1.",
+                },
+                "audio": {
+                    "type": "boolean",
+                    "description": "Toggle audio processing (NOT the live audio track in camlist). Triggers brief stream restart.",
+                },
+                "output": {
+                    "type": "boolean",
+                    "description": "Set first DIO output. WARNING: BI write reply echoes pre-write value; tool verifies via separate read.",
+                },
+                "manrec": {
+                    "type": "boolean",
+                    "description": "Start/stop manual recording. Verified via camlist.isManRec.",
+                },
+                "pause": {
+                    "description": (
+                        "Pause the camera. Int code -1..10 OR named string. Codes: "
+                        "-1=indefinite, 0=off (cancel), 1=add30s, 2=add5m, 3=add30m, "
+                        "4=add1h, 5=add2h, 6=add3h, 7=add5h, 8=add10h, 9=add24h, "
+                        "10=add15m. Names map to the same codes (e.g. '5m'=2, "
+                        "'indefinite'=-1, 'off'=0). NOTE: codes 1..10 are ADDITIVE — "
+                        "calling the same code twice extends the pause, doesn't "
+                        "replace it. Use pause=0 / pause='off' to cancel."
+                    ),
+                },
+                "profile": {
+                    "type": "integer",
+                    "description": (
+                        "Per-camera profile override (-1..7). Different from global "
+                        "bi_set_profile. Pair with optional `lock` to hold the "
+                        "override across schedule changes. profile=-1 is silently "
+                        "coerced to the current global on an enabled camera; clear "
+                        "the override via enable=false instead."
+                    ),
+                },
+                "lock": {
+                    "type": "boolean",
+                    "description": "Modifier for `profile` — holds the per-camera profile override across schedule changes. Only valid when `profile` is also passed.",
+                },
+                "reset": {
+                    "type": "boolean",
+                    "description": (
+                        "Force a camera stream reload (drop+reopen the BI->camera "
+                        "connection). For troubleshooting flaky streams. Only accepts "
+                        "true. NOT a counter reset (use bi_list_alerts reset=true "
+                        "for that — separate cmd)."
+                    ),
+                },
+                "reboot": {
+                    "type": "boolean",
+                    "description": (
+                        "Send hardware reboot command to the camera. ~75s end-to-end "
+                        "outage (~30s before offline, ~45s offline). Only accepts "
+                        "true. Tool samples briefly (~10s) for the isOnline dip but "
+                        "does NOT wait for full recovery; poll bi_list_cameras "
+                        "manually if you need to confirm the camera is back."
+                    ),
+                },
+            },
+            "required": ["camera"],
+            "additionalProperties": False,
+        },
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
+            "title": "Set BI camera state",
         },
     )
