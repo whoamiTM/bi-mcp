@@ -156,23 +156,27 @@ quoting values from a stale file.
 ### Action-set decoder coverage
 
 `bi_get_actionset` decoder tables were built empirically from this install
-(Pass 1, 2026-05-17, 11 cameras, 28 action entries). The full `type` map was
-later filled in by the user (2026-05-17). Remaining gaps are in payload-field
-decoding for kinds the install doesn't use:
+(Pass 1, 2026-05-17, 11 cameras, 28 action entries), then expanded against
+jaydeel's authoritative PowerShell decoders on ipcamtalk thread 85627
+(2026-05-21). Coverage now:
 
-| Field         | Mapped values                          | Pass 2 needed for                     |
-| ------------- | -------------------------------------- | ------------------------------------- |
-| `type`        | **0-13 full map**: 0=sound, 1=push, 2=run, 3=web, 4=email, 5=sms, 6=phone, 7=dio, 8=toast, 9=ftp, 10=shield, 11=schedule, 12=do_command, 13=wait | — (kind labels complete; per-type payload fields below still partial) |
-| `command`     | 2200-2299 (PTZ preset)                 | snapshot, profile change, /admin?, etc. (manual lists ~30 do-commands) |
-| `web_proto1`  | 2 (MQTT)                               | HTTP-GET / HTTP-POST / TCP            |
-| `profiles`    | full (bits 1-7 → profiles 1-7)         | —                                     |
-| `trig_zones`  | full (bits 0-7 → zones A-G + Hotspot)  | —                                     |
-| `trig_source` | passed through raw (bits 1,2,3,7,14 observed) | full bit-position map (toggle each "Trigger sources" checkbox in UI) |
+| Field            | Mapped values                                                                   | Still missing                          |
+| ---------------- | ------------------------------------------------------------------------------- | -------------------------------------- |
+| `type`           | 0-13 full map (sound, push, run, web, email, sms, phone, dio, toast, ftp, shield, schedule, do_command, wait) | per-type payload field names for unexercised kinds |
+| `command`        | PTZ presets 2201-2456, action sets 33203-33210, brightness/contrast/gain ranges, PTZ speed/outputs, ~60 individual codes | any code not in jaydeel's table        |
+| `web_proto1`     | 0=http, 1=https, 2=mqtt (full; no TCP option exists)                            | —                                      |
+| `run_action`     | 0=run_program, 1=write_file_append, 2=write_file_replace, 3=delete_file         | —                                      |
+| `trig_allzones`  | 0=exact, 1=all, 2=any                                                           | —                                      |
+| `profiles`       | bits 0-6 → profiles 0-6 (profile 0 = "Inactive"); legacy sentinel 46 = no profiles | —                                  |
+| `trig_zones`     | bits 0-7 → zones A-H (H = Hotspot)                                              | —                                      |
+| `diobits`        | bits 0-31 → DIO 1-32                                                            | —                                      |
+| `trig_source`    | bits 1,2,3,4,5,6,14 (motion, onvif, audio, external, dio, group, ai) decoded into a list; `trig_source_raw` preserved | bit 7 (=128) observed in our exports but unnamed by jaydeel |
 
 Unmapped values fall through as `type: "unknown"` / `command_raw: <int>` /
 `protocol: "unknown"` — the original dict is always preserved under `raw`, so
 the tool never loses data. When adding a new mapping, edit the tables at the
-top of `shapers.shape_actionset` (`_ACTION_TYPE`, `_WEB_PROTO`, `_decode_command`).
+top of `shapers.shape_actionset` (`_ACTION_TYPE`, `_WEB_PROTO`,
+`_RUN_ACTION`, `_DOCMD_INDIVIDUAL`, `_decode_command`, etc.).
 
 **Known field hint** (from ipcamtalk research, 2026-05-17): Sound actions
 store their audio file path under `Alerts\OnTrigger\<N>\soundPath`. When the

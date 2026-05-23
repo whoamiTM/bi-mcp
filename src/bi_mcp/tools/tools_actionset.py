@@ -6,9 +6,11 @@ and Alerts\\OnReset\\<N>, and contain integer-coded fields (`type`, `command`,
 `trig_source`, `web_proto1`, plus bitmasks like `profiles` and `trig_zones`).
 
 bi_get_reg already returns this data raw; bi_get_actionset wraps it with a
-decoder layer derived empirically from this install (Pass 1, 2026-05-17).
-Coverage is partial — see shapers.shape_actionset for the decoder tables and
-which action kinds are still "unknown".
+decoder layer derived empirically from this install (Pass 1, 2026-05-17),
+extended against jaydeel's authoritative decoder tables on ipcamtalk thread
+85627 (2026-05-21). Remaining unknowns: bit 7 of `trig_source`, and
+per-type payload field names for action kinds we haven't exercised in the UI.
+See shapers.shape_actionset for the decoder tables.
 """
 
 from __future__ import annotations
@@ -56,13 +58,16 @@ def register() -> None:
         _tool_get_actionset,
         description=(
             "Return the semantic action set (OnTrigger and/or OnReset) for a "
-            "camera. Decodes action `type` codes, the PTZ-preset `command` "
-            "family (2200+N), and the profiles/zones bitmasks into readable "
-            "lists. Unmapped action kinds fall through as type='unknown' with "
-            "the raw dict preserved under 'raw'. Source data comes from the "
-            "camera's .reg export, so changes made via the BI UI mid-session "
-            "won't be visible until a re-export. Decoder coverage is partial "
-            "— see meta.decoder_note in the response."
+            "camera. Decodes the full action `type` map (0-13), the `command` "
+            "table for type=12 do-commands (PTZ presets 2201-2456, action "
+            "sets, brightness/contrast/gain, plus ~60 individual codes), "
+            "`web_proto1` (http/https/mqtt), `run_action`, `trig_allzones`, "
+            "and the profiles/zones/diobits/trig_source bitmasks into "
+            "readable lists. Unmapped values fall through with the raw int "
+            "preserved alongside (e.g. `command_raw`, `trig_source_raw`). "
+            "Source data comes from the camera's .reg export, so changes "
+            "made via the BI UI mid-session won't be visible until a "
+            "re-export."
         ),
         schema={
             "type": "object",

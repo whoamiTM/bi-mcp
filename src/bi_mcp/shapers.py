@@ -599,9 +599,42 @@ _ACTION_TYPE: dict[int, str] = {
 }
 
 # web_proto1 enum (Alerts\OnTrigger\N\web_proto1) for type=3 actions.
-# Only value 2 (MQTT) observed.
+# Source: jaydeel ipcamtalk thread 85627 (2026-05-21).
 _WEB_PROTO: dict[int, str] = {
+    0: "http",
+    1: "https",
     2: "mqtt",
+}
+
+# run_action enum (Alerts\OnTrigger\N\run_action) for type=2 actions.
+# Source: jaydeel ipcamtalk thread 85627 (2026-05-21).
+_RUN_ACTION: dict[int, str] = {
+    0: "run_program",
+    1: "write_file_append",
+    2: "write_file_replace",
+    3: "delete_file",
+}
+
+# trig_allzones enum — zone-match mode for the trig_zones bitmask.
+# Source: jaydeel ipcamtalk thread 85627 (2026-05-21).
+_TRIG_ALLZONES: dict[int, str] = {
+    0: "exact",  # "=" in BI UI
+    1: "all",
+    2: "any",
+}
+
+# trig_source bitmask — which trigger sources fire this action.
+# Source: jaydeel ipcamtalk thread 85627 (2026-05-21). Bit 7 observed in our
+# exports (e.g. 132 = 4|128, 16514 = 2|128|16384) but unnamed by jaydeel —
+# keep `trig_source_raw` alongside the decoded list until identified.
+_TRIG_SOURCE_BITS: dict[int, str] = {
+    1: "motion",
+    2: "onvif",
+    3: "audio",
+    4: "external",
+    5: "dio",
+    6: "group",
+    14: "ai",
 }
 
 
@@ -612,8 +645,19 @@ def _decode_bitmask(mask: int, labels: list[str]) -> list[str]:
     return [lbl for i, lbl in enumerate(labels) if mask & (1 << i)]
 
 
-# profiles: bits 1-7 = profiles 1-7. Bit 0 is unused (or "inactive").
-_PROFILE_LABELS = ["inactive"] + [str(n) for n in range(1, 8)]
+def _decode_bit_dict(mask: int, bits: dict[int, str]) -> list[str]:
+    """Decode a bitmask using a sparse {bit_index: label} map (for non-contiguous bits)."""
+    if not isinstance(mask, int):
+        return []
+    return [bits[b] for b in sorted(bits) if mask & (1 << b)]
+
+
+# profiles: bits 0-6 = profiles 0-6. Profile 0 is BI's real "Inactive" profile.
+# Source: jaydeel ipcamtalk thread 85627 (2026-05-21).
+_PROFILE_LABELS = [str(n) for n in range(7)]
+
+# Legacy sentinel: profiles=46 (0x2E) means "no profiles selected".
+_PROFILES_NONE_SENTINEL = 46
 
 # trig_zones: bits 0-7 = zones A-H. Per UI3 source (ui3.js ~6114), zone H is
 # the "Hotspot" zone in the BI UI — labelled distinctly from regular zones
@@ -621,17 +665,78 @@ _PROFILE_LABELS = ["inactive"] + [str(n) for n in range(1, 8)]
 # in the AGENTS.md decoder table.
 _ZONE_LABELS = list("ABCDEFGH")
 
+# diobits: bits 0-31 = DIO 1-32 (1-indexed in BI UI).
+# Source: jaydeel ipcamtalk thread 85627 (2026-05-21).
+_DIO_LABELS = [str(n) for n in range(1, 33)]
+
+
+# Individual `command` codes for type=12 (Do Command) actions.
+# Source: jaydeel ipcamtalk thread 85627 (2026-05-21).
+_DOCMD_INDIVIDUAL: dict[int, str] = {
+    1: "admin_request",
+    58491: "camera_restart",
+    58508: "camera_trigger",
+    58473: "camera_snapshot",
+    32796: "camera_enable",
+    32797: "camera_disable",
+    32798: "camera_toggle_enable",
+    58662: "camera_show",
+    58663: "camera_hide",
+    58664: "dio_1_on", 58665: "dio_2_on", 58666: "dio_3_on",
+    58674: "dio_1_off", 58675: "dio_2_off",
+    58684: "focus_far", 58685: "focus_near",
+    58754: "iris_open", 58755: "iris_close",
+    58720: "ir_leds_on", 58721: "ir_leds_off", 58722: "ir_leds_auto",
+    58686: "pan_left", 58687: "pan_right",
+    58688: "tilt_up", 58689: "tilt_down",
+    58690: "ptz_home",
+    58691: "zoom_in", 58692: "zoom_out",
+    59060: "ptz_speed_increase", 59061: "ptz_speed_decrease",
+    32945: "patrol_on", 32946: "patrol_off",
+    58725: "ptz_preset_previous",
+    58694: "mode_50hz", 58695: "mode_60hz", 58696: "mode_outdoor",
+    32930: "overlay_toggle",
+    32890: "pause_indefinite",
+    32891: "pause_reset",
+    32892: "pause_add_30s",
+    32893: "pause_add_5m", 32901: "pause_add_15m", 32894: "pause_add_30m",
+    32895: "pause_add_1h", 32896: "pause_add_2h", 32897: "pause_add_3h",
+    32898: "pause_add_5h", 32899: "pause_add_10h",
+    58500: "record_toggle",
+    58723: "reboot_camera", 58782: "reboot_pc",
+    58970: "shutter_1_6", 58971: "shutter_1_12", 58972: "shutter_1_30",
+    58973: "shutter_1_60", 58974: "shutter_1_90",
+    58976: "shutter_1_200", 58977: "shutter_1_250", 58978: "shutter_1_500",
+    58979: "shutter_1_1000", 58980: "shutter_1_2000", 58981: "shutter_1_4000",
+    58752: "wiper_off", 58753: "wiper_on",
+}
+
 
 def _decode_command(cmd: int) -> dict[str, Any]:
     """Decode the `command` integer in a type=12 (Do Command) action.
 
-    Only the 2200+N "Call PTZ preset N" family is mapped (Pass 1 observation).
-    Other Do Command codes need empirical mapping via Pass 2.
+    Source: jaydeel ipcamtalk thread 85627 (2026-05-21).
     """
     if not isinstance(cmd, int):
         return {"command_raw": cmd}
-    if 2200 <= cmd <= 2299:
+    if 2201 <= cmd <= 2456:
         return {"command": "ptz_preset", "preset": cmd - 2200}
+    if 33203 <= cmd <= 33210:
+        return {"command": "action_set", "set": cmd - 33202}
+    if 58697 <= cmd <= 58712:
+        return {"command": "brightness", "value": cmd - 58697}
+    if 58713 <= cmd <= 58719:
+        return {"command": "contrast", "value": cmd - 58713}
+    if 58985 <= cmd <= 58995:
+        return {"command": "gain", "percent": (cmd - 58985) * 10}
+    if 59050 <= cmd <= 59059:
+        return {"command": "ptz_speed", "value": cmd - 59049}
+    if 59027 <= cmd <= 59034:
+        return {"command": "set_output", "output": cmd - 59026}
+    if 59035 <= cmd <= 59042:
+        return {"command": "reset_output", "output": cmd - 59034}
+    if cmd in _DOCMD_INDIVIDUAL:
+        return {"command": _DOCMD_INDIVIDUAL[cmd]}
     return {"command_raw": cmd}
 
 
@@ -652,19 +757,34 @@ def _shape_action_entry(idx: int, raw: dict[str, Any]) -> dict[str, Any]:
     # filters block (common across all action types)
     filters: dict[str, Any] = {}
     if "profiles" in raw:
-        filters["profiles"] = _decode_bitmask(raw["profiles"], _PROFILE_LABELS)
+        p = raw["profiles"]
+        if isinstance(p, int) and p == _PROFILES_NONE_SENTINEL:
+            filters["profiles"] = []
+        else:
+            filters["profiles"] = _decode_bitmask(p, _PROFILE_LABELS)
     if "trig_zones" in raw:
         filters["zones"] = _decode_bitmask(raw["trig_zones"], _ZONE_LABELS)
-    if raw.get("trig_allzones"):
-        filters["zones_all_required"] = True
+    if "trig_allzones" in raw:
+        mode_int = raw["trig_allzones"]
+        mode = _TRIG_ALLZONES.get(mode_int)
+        if mode:
+            filters["zones_match"] = mode
+        else:
+            filters["zones_match_raw"] = mode_int
     if raw.get("trig_object"):
         # comma-separated, lowercase for stability (some entries use "Person")
         filters["objects"] = [s.strip().lower() for s in str(raw["trig_object"]).split(",") if s.strip()]
     if raw.get("trig_skip"):
         filters["skip"] = raw["trig_skip"]
-    # trig_source bitmask is only partially decoded — pass through raw int.
     if "trig_source" in raw:
-        filters["trig_source_raw"] = raw["trig_source"]
+        ts = raw["trig_source"]
+        decoded = _decode_bit_dict(ts, _TRIG_SOURCE_BITS)
+        # Only emit the decoded list when at least one bit decoded — empty
+        # would be ambiguous with "no sources set". Bit 7 (=128) is observed
+        # but unnamed; raw is always preserved for audit.
+        if decoded:
+            filters["trig_source"] = decoded
+        filters["trig_source_raw"] = ts
     if filters:
         out["filters"] = filters
 
@@ -694,6 +814,19 @@ def _shape_action_entry(idx: int, raw: dict[str, Any]) -> dict[str, Any]:
             out["target_camera"] = raw["camname"]
         if raw.get("remote"):
             out["execute_on_remote"] = True
+
+    elif kind == "run":
+        ra_int = raw.get("run_action")
+        if ra_int is not None:
+            sub = _RUN_ACTION.get(ra_int)
+            if sub:
+                out["run_action"] = sub
+            else:
+                out["run_action_raw"] = ra_int
+
+    elif kind == "dio":
+        if "diobits" in raw:
+            out["dio_outputs"] = _decode_bitmask(raw["diobits"], _DIO_LABELS)
 
     # always preserve raw for debugging / unmapped fields
     out["raw"] = raw
@@ -738,14 +871,17 @@ def shape_actionset(
         "meta": {
             "mtime_age_days": round(mtime_age_days, 2),
             "stale": mtime_age_days > 7.0,
-            "decoder_coverage": "partial",
+            "decoder_coverage": "high",
             "decoder_note": (
-                "all 14 type codes (0-13) are labeled (sound/push/run/web/"
-                "email/sms/phone/dio/toast/ftp/shield/schedule/do_command/"
-                "wait). Payload-field decoding is complete for type=3 (web/"
-                "mqtt via web_proto1) and type=12 (do_command, command "
-                "2200-2299 = ptz_preset); other types pass raw payload "
-                "fields through. See bi-mcp/AGENTS.md for the full table."
+                "all 14 type codes (0-13) labeled; full filter-bitmask "
+                "decode (profiles, trig_zones, trig_allzones, trig_source, "
+                "diobits); type=3 web_proto1 (http/https/mqtt), type=2 "
+                "run_action, type=7 diobits, and type=12 command (PTZ "
+                "presets 2201-2456, action sets, brightness/contrast/gain "
+                "ranges, ~60 individual codes) decoded. Known gaps: bit 7 "
+                "of trig_source (passed through as trig_source_raw), and "
+                "payload-field names for unexercised types (email, sms, "
+                "push, ftp, etc.). See bi-mcp/AGENTS.md for the full table."
             ),
         },
     }
