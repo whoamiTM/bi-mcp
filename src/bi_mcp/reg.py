@@ -185,6 +185,22 @@ def mtime_age_days(path: Path) -> float:
     return (time.time() - path.stat().st_mtime) / 86400.0
 
 
+def list_reg_cameras() -> list[str]:
+    """Return camera short names with a ``.reg`` export in ``_reg_dir()``,
+    sorted alphabetically. Used by audit tools that need to walk the whole
+    install without a pre-built roster."""
+    reg_dir = _reg_dir()
+    if not reg_dir.is_dir():
+        return []
+    shorts: list[str] = []
+    for p in reg_dir.glob("*.reg"):
+        stem = p.stem
+        if _CAMERA_SHORT_RE.fullmatch(stem):
+            shorts.append(stem)
+    shorts.sort()
+    return shorts
+
+
 def parse_reg(camera_short: str, key_path: str | None = None) -> tuple[dict[str, Any], float]:
     """Parse the .reg file for ``camera_short``.
 

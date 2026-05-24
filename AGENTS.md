@@ -65,6 +65,7 @@ For static facts (camera → IP, role, friendly name), do **not** call
 | `bi_list_log`           | `log`        |   ✓    |           | System log entries with filters (since/camera/obj/levels/match/regex). Returns {entries, scanned, matched, warning?} |
 | `bi_get_reg`            | (file)       |        |           | .reg hive parse — for what the API can't reach                 |
 | `bi_get_actionset`      | (file)       |        |           | Semantic view of Alerts\\OnTrigger / OnReset (decoded)         |
+| `bi_audit_actions`      | (file)       |        |           | Cross-camera drift report — buckets action rows by (type, description, type-specific key) and flags fields where one row deviates from the cohort majority. Templates per-camera tokens (`ai/<CAM>/motion`) before comparison. Re-surfaces raw `trig_object`/`trig_skip` to catch case-sensitivity typos the shaper would otherwise normalize away. |
 | `bi_trigger_camera`     | `trigger`    |   ✓    |     ✓     | Fire a synthetic motion trigger                                |
 | `bi_set_ptz_preset`     | `ptz` (cmd)  |        |     ✓     | Recall a PTZ preset (1-20)                                     |
 | `bi_set_profile`        | `status` set |   ✓    |     ✓     | Switch active profile                                          |
