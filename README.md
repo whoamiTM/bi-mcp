@@ -7,9 +7,10 @@ tools it needs (`bi_get_status`, `bi_get_camera_config`, `bi_list_alerts`,
 `bi_list_log`, `bi_get_reg`, …) and tells you what to change, citing the Blue
 Iris manual.
 
-**13 read-only tools** by default, plus **3 mutating tools**
-(`bi_trigger_camera`, `bi_set_ptz_preset`, `bi_set_profile`) that register only
-when `BI_MCP_ALLOW_MUTATIONS=1`. MIT-licensed.
+**16 read-only tools** by default, plus **6 mutating tools**
+(`bi_trigger_camera`, `bi_set_ptz_preset`, `bi_set_profile`, `bi_export_clip`,
+`bi_update_record`, `bi_set_camera`) that register only when
+`BI_MCP_ALLOW_MUTATIONS=1`. MIT-licensed.
 
 For agents (LLMs working through this server): read [AGENTS.md](AGENTS.md) —
 that's the canonical operating manual with tool routing, mutation safety
@@ -97,7 +98,8 @@ and add an entry under `mcpServers`:
 }
 ```
 
-Restart Claude Code. The 10 `bi_*` tools should now appear in your tool list.
+Restart Claude Code. The `bi_*` tools should now appear in your tool list (16
+read tools by default, 22 if `BI_MCP_ALLOW_MUTATIONS=1`).
 
 ## Verify it works
 
@@ -146,15 +148,15 @@ client tool-name caches, or shell scripts accordingly:
 | `bi_timeline`        | `bi_get_timeline`        |
 | `bi_ptz_status`      | `bi_get_ptz_status`      |
 
-The rename is deliberate — naming consistency across the now-16-tool surface
+The rename is deliberate — naming consistency across the now-22-tool surface
 matters more than one-time backward compatibility for a pre-1.0 server. If
 that tradeoff doesn't work for your install, stay on v0.1.0.
 
 ## Tool reference
 
-13 read tools register by default. `bi_trigger_camera`, `bi_set_ptz_preset`,
-and `bi_set_profile` register only when `BI_MCP_ALLOW_MUTATIONS=1`. Pass
-`raw=true` on any tool to get the unshaped Blue Iris JSON.
+16 read tools register by default. The 6 mutating tools register only when
+`BI_MCP_ALLOW_MUTATIONS=1`. Pass `raw=true` on any tool to get the unshaped
+Blue Iris JSON.
 
 For the canonical reference with routing tables, error taxonomy, and
 mutation-safety rules, see [AGENTS.md](AGENTS.md).
@@ -175,9 +177,14 @@ mutation-safety rules, see [AGENTS.md](AGENTS.md).
 | `bi_get_ptz_status` | `ptz` (query) | | | Current PTZ position, preset list, lock state. |
 | `bi_list_log` | `log` | ✓ | | Recent BI system log entries. |
 | `bi_get_reg` | (file parser) | | | Parse `.reg` camera export — trigger zones, AI thresholds, per-preset flags. |
-| `bi_trigger_camera` | `trigger` | | ✓ | Fire a synthetic motion trigger (mutations flag). |
+| `bi_get_actionset` | (file parser) | | | Decoded semantic view of `Alerts\OnTrigger` / `OnReset` action rows. |
+| `bi_audit_actions` | (file parser) | | | Cross-camera drift report — flags action-row fields that deviate from the cohort majority. |
+| `bi_trigger_camera` | `trigger` | ✓ | ✓ | Fire a synthetic motion trigger (mutations flag). |
 | `bi_set_ptz_preset` | `ptz` (cmd) | | ✓ | Recall a PTZ preset 1-20 (mutations flag). |
-| `bi_set_profile` | `status` (set) | | ✓ | Switch active profile (mutations flag). |
+| `bi_set_profile` | `status` (set) | ✓ | ✓ | Switch active profile (mutations flag). |
+| `bi_export_clip` | `export` | ✓ | ✓ | Async MP4/AVI/WMV export from a clip range (modes: create / status / list). Requires BI user `clipcreate=true`. |
+| `bi_update_record` | `update` | | ✓ | Set memo (≤35 chars) and/or flag bits on one alert or clip @record. Auto-preserves `flagged` on memo-only writes. |
+| `bi_set_camera` | `camconfig` | ✓ | ✓ | 10 ops: rename, hide, enable, audio, output, manrec, pause, profile+lock, reset, reboot. All verify post-write. |
 
 ### Enabling mutating tools
 
@@ -243,36 +250,40 @@ This server is designed to run **locally**, talking to a Blue Iris box on the
 **same LAN**. It does not listen on a network port; it speaks stdio to one
 MCP client at a time. It should not be exposed to the internet.
 
-**Create a dedicated Blue Iris user** for it (BI → Settings → Users → +):
+**Create a dedicated low-privilege Blue Iris user** for the read tools
+(BI → Settings → Users → +):
 
 | Setting | Value | Why |
 |---|---|---|
 | Access | Local + LAN | Required for the server to authenticate. |
-| Admin | unchecked | No need; server is read-only. |
-| Change profile | unchecked | We don't change profiles. |
-| PTZ | **checked** | Needed for `bi_ptz_status`. |
+| Admin | unchecked | Read tools don't need it; admin-gated reads use a separate user (below). |
+| Change profile | unchecked | `bi_set_profile` routes through the admin user. |
+| PTZ | **checked** | Needed for `bi_get_ptz_status` and `bi_set_ptz_preset`. |
 | Audio | unchecked | Not used. |
-| Clips | **checked** | Needed for `bi_alerts`, `bi_clip_info`, `bi_alert_tracks`, `bi_timeline`. |
-| Clip create | unchecked | We don't create or export. |
+| Clips | **checked** | Needed for `bi_list_alerts`, `bi_get_clip_info`, `bi_get_alert_tracks`, `bi_get_timeline`, `bi_list_clips`. |
+| Clip create | **checked** *only* if you enable `bi_export_clip` | Required by the BI `export` cmd. Leave unchecked otherwise. |
 | Camera groups | (tick all you want Claude to see) | |
 
 `.env` is gitignored. Never commit it. If you commit credentials by accident,
 delete the user in Blue Iris immediately and create a new one.
 
-### Why `bi_list_log` / `bi_get_sysconfig` need admin
+### Admin-gated tools and the two-user setup
 
-Blue Iris gates the `log` and `sysconfig` JSON cmds behind admin, as does the
-deep (camconfig) path of `bi_get_camera_config`. The recommended pattern is a
-**two-user setup**:
+Blue Iris gates several JSON cmds behind admin, so the recommended pattern is
+a **two-user setup**:
 
 - `BI_USER` / `BI_PASS` — low-privilege account (PTZ + Clips), used for all
   read tools that don't need admin.
 - `BI_ADMIN_USER` / `BI_ADMIN_PASS` — a dedicated admin account, used only
-  for the admin-gated cmds.
+  for the admin-gated cmds (marked ✓ in the *Admin?* column of the tool table
+  above). Covers `bi_get_sysconfig`, `bi_list_log`, the deep path of
+  `bi_get_camera_config`, `bi_get_camera_motion_config`, `bi_trigger_camera`,
+  `bi_set_profile`, `bi_export_clip`, and `bi_set_camera` (all ops).
 
 If only the read user is configured, admin-gated tools degrade gracefully
-(deep `bi_get_camera_config` falls back to the shallow `camlist` view;
-`bi_list_log` and `bi_get_sysconfig` raise a clear `admin_required` error).
+(deep `bi_get_camera_config` falls back to the shallow `camlist` view; other
+admin-gated tools raise a clear `admin_required` error). See [AGENTS.md
+§ Mutation patterns](AGENTS.md) before enabling the mutating tools.
 
 ## License
 
