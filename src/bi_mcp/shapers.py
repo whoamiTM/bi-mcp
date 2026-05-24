@@ -831,6 +831,12 @@ def _shape_action_entry(idx: int, raw: dict[str, Any]) -> dict[str, Any]:
         if decoded:
             filters["trig_source"] = decoded
         filters["trig_source_raw"] = ts
+    # diobits is a universal per-row DIO trigger-gate bitmask (channel N = bit
+    # N-1). Distinct from type=7's dio_number (output channel the row drives).
+    if "diobits" in raw:
+        db = raw["diobits"]
+        if isinstance(db, int) and db != 0:
+            filters["dio_trigger_gate"] = _decode_bitmask(db, _DIO_LABELS)
     if filters:
         out["filters"] = filters
 
@@ -871,8 +877,183 @@ def _shape_action_entry(idx: int, raw: dict[str, Any]) -> dict[str, Any]:
                 out["run_action_raw"] = ra_int
 
     elif kind == "dio":
-        if "diobits" in raw:
+        # type=7 output channel is dio_number (single int, 1-based). Legacy
+        # fallback to diobits for older exports that lacked the field.
+        if "dio_number" in raw:
+            out["dio_output"] = raw["dio_number"]
+        elif "diobits" in raw:
             out["dio_outputs"] = _decode_bitmask(raw["diobits"], _DIO_LABELS)
+        if raw.get("dio_time_ms") not in (None, 0):
+            out["pulse_ms"] = raw["dio_time_ms"]
+        if raw.get("camdio"):
+            out["use_camera_dio"] = True
+
+    elif kind == "sound":
+        for src, dst in [
+            ("sound_path", "path"),
+            ("sound_volume", "volume"),
+            ("sound_devname", "device_name"),
+        ]:
+            if raw.get(src) not in (None, "", 0):
+                out[dst] = raw[src]
+        if raw.get("sound_camera"):
+            out["play_on_camera"] = True
+        if raw.get("sound_device"):
+            out["play_on_device"] = True
+        if raw.get("sound_loop"):
+            out["loop"] = True
+            if raw.get("sound_looptime"):
+                out["loop_seconds"] = raw["sound_looptime"]
+        if raw.get("remote"):
+            out["execute_on_remote"] = True
+
+    elif kind == "push":
+        for src, dst in [
+            ("title", "title"),
+            ("text", "body"),
+            ("tags", "device_tag"),
+            ("push_sound", "sound"),
+            ("push_imagegroup", "image_group"),
+            ("volume", "volume"),
+        ]:
+            if raw.get(src) not in (None, "", 0):
+                out[dst] = raw[src]
+        for flag in ("richpush", "richgif", "critical", "camgroup"):
+            if raw.get(flag):
+                out[flag] = True
+
+    elif kind == "email":
+        for src, dst in [
+            ("email_recipient", "to"),
+            ("email_subject", "subject"),
+            ("email_body", "body"),
+            ("email_server", "server"),
+            ("email_imagegroup", "image_group"),
+            ("email_mp4sec", "mp4_seconds"),
+            ("email_waitsec", "wait_seconds"),
+            ("emailquality", "image_quality"),
+            ("emailscale", "image_scale_pct"),
+        ]:
+            if raw.get(src) not in (None, "", 0):
+                out[dst] = raw[src]
+        if raw.get("email_2images"):
+            out["include_before_after"] = True
+        if raw.get("email_alertimage"):
+            out["include_alert_image"] = True
+        if raw.get("email_images"):
+            out["include_images"] = True
+        if raw.get("mp4audio"):
+            out["mp4_audio"] = True
+
+    elif kind == "sms":
+        for src, dst in [
+            ("sms_to", "to"),
+            ("sms_text", "body"),
+            ("sms_subject", "subject"),
+            ("sms_carrier", "carrier"),
+            ("sms_gateway", "gateway"),
+            ("sms_server", "server"),
+            ("sms_imagegroup", "image_group"),
+            ("sms_quality", "image_quality"),
+            ("sms_scale", "image_scale_pct"),
+        ]:
+            if raw.get(src) not in (None, "", 0):
+                out[dst] = raw[src]
+
+    elif kind == "phone":
+        for src, dst in [
+            ("phone_number", "number"),
+            ("phone_number2", "backup_number"),
+            ("phone_soundpath", "sound_path"),
+            ("phone_soundname", "sound_profile"),
+            ("phone_retries", "retries"),
+            ("phone_duration", "max_seconds"),
+        ]:
+            if raw.get(src) not in (None, "", 0):
+                out[dst] = raw[src]
+        if raw.get("phone_audio"):
+            out["audio_enabled"] = True
+
+    elif kind == "toast":
+        if raw.get("text"):
+            out["body"] = raw["text"]
+        if raw.get("image"):
+            out["include_hero_image"] = True
+
+    elif kind == "ftp":  # Save JPEG/MP4 (local and/or FTP)
+        # source enum: 1=specific_file, 2=group_image, 3=current_camera_image,
+        # 4=alert_media. UI options "alert image" and "alert MP4" both write
+        # source=4; mp4sec/mp4audio presence distinguishes them.
+        src_int = raw.get("source")
+        src_map = {1: "specific_file", 2: "group_image",
+                   3: "current_camera_image", 4: "alert_media"}
+        if src_int in src_map:
+            out["source"] = src_map[src_int]
+            if src_int == 4:
+                if raw.get("mp4sec"):
+                    out["alert_media_kind"] = "mp4"
+                    out["mp4_seconds"] = raw["mp4sec"]
+                    if raw.get("mp4audio"):
+                        out["mp4_audio"] = True
+                else:
+                    out["alert_media_kind"] = "image"
+                if raw.get("markup"):
+                    out["include_ai_markup"] = True
+        elif src_int is not None:
+            out["source_raw"] = src_int
+        if raw.get("local"):
+            out["save_local"] = True
+        if raw.get("ftp"):
+            out["save_ftp"] = True
+        for src, dst in [
+            ("localfolder", "local_folder"),
+            ("ftpserver", "ftp_server"),
+            ("ftpfolder", "ftp_folder"),
+            ("remote", "filename_template"),
+            ("filename", "filename_override"),
+            ("groupname", "group_name"),
+            ("camname", "target_camera"),
+        ]:
+            if raw.get(src) not in (None, "", "(default)"):
+                out[dst] = raw[src]
+
+    elif kind == "shield":
+        out["shield"] = bool(raw.get("shield", 0))
+
+    elif kind == "schedule":
+        if raw.get("bschedule"):
+            # BI writes `schedule` as RegSZ (schedule name like "Day_Night").
+            out["set_schedule"] = raw.get("schedule", "")
+        if raw.get("bprofile"):
+            out["set_profile"] = raw.get("profile")
+        if raw.get("plock"):
+            out["lock_profile"] = True
+
+    elif kind == "wait":
+        if raw.get("breaktime") is not None:
+            out["max_wait_ms"] = raw["breaktime"]
+        mode_int = raw.get("mode")
+        if isinstance(mode_int, int):
+            conds = []
+            if mode_int & 1:
+                conds.append("queues_empty")
+            if mode_int & 2:
+                conds.append("no_longer_triggered")
+            if mode_int & 4:
+                conds.append("retriggered")
+            # empty list = wait full max_wait_ms unconditionally
+            out["continue_when"] = conds
+        for flag, dst in [
+            ("cutclip", "cut_clip"),
+            ("cancelq", "cancel_previous_actions"),
+            ("reqtrigger", "cancel_if_no_longer_triggered"),
+            ("newtime", "adopt_current_time"),
+            ("newsources", "adopt_new_sources"),
+        ]:
+            if raw.get(flag):
+                out[dst] = True
+        if raw.get("crossing"):
+            out["zone_crossing"] = raw["crossing"]
 
     # always preserve raw for debugging / unmapped fields
     out["raw"] = raw
@@ -919,15 +1100,15 @@ def shape_actionset(
             "stale": mtime_age_days > 7.0,
             "decoder_coverage": "high",
             "decoder_note": (
-                "all 14 type codes (0-13) labeled; full filter-bitmask "
+                "all 13 type codes (0-13, sparse) labeled with per-type "
+                "payload decode (sound/push/run/web/email/sms/phone/dio/"
+                "toast/save/shield/schedule/do_command/wait); full filter "
                 "decode (profiles, trig_zones, trig_allzones, trig_source, "
-                "diobits); type=3 web_proto1 (http/https/mqtt), type=2 "
-                "run_action, type=7 diobits, and type=12 command (PTZ "
-                "presets 2201-2456, action sets, brightness/contrast/gain "
-                "ranges, ~60 individual codes) decoded. Known gaps: bit 7 "
-                "of trig_source (passed through as trig_source_raw), and "
-                "payload-field names for unexercised types (email, sms, "
-                "push, ftp, etc.). See bi-mcp/AGENTS.md for the full table."
+                "diobits-as-trigger-gate); save (type=9) source enum with "
+                "alert-image/MP4 disambiguation; wait (type=13) continue-"
+                "when bitmask. Known gap: bit 7 of trig_source (preserved "
+                "as trig_source_raw). See bi-mcp/AGENTS.md for the full "
+                "table."
             ),
         },
     }

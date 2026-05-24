@@ -168,30 +168,31 @@ quoting values from a stale file.
 `bi_get_actionset` decoder tables were built empirically from this install
 (Pass 1, 2026-05-17, 11 cameras, 28 action entries), then expanded against
 jaydeel's authoritative PowerShell decoders on ipcamtalk thread 85627
-(2026-05-21). Coverage now:
+(2026-05-21), and closed out 2026-05-24 by diffing a throwaway clone
+fixture with one row of every action kind (`cam settings/clone_seccam_10_test.reg`
+in the parent repo, commit `d43b63f`). All 13 action kinds in BI 5.9.9.71
+now have per-type payload decoders. The `type` integer space is sparse
+(0-11, 13 used; 12 is renamed do_command; 14+ unused). Coverage now:
 
 | Field            | Mapped values                                                                   | Still missing                          |
 | ---------------- | ------------------------------------------------------------------------------- | -------------------------------------- |
-| `type`           | 0-13 full map (sound, push, run, web, email, sms, phone, dio, toast, ftp, shield, schedule, do_command, wait) | per-type payload field names for unexercised kinds |
+| `type`           | 0-13 full map (sound, push, run, web, email, sms, phone, dio, toast, ftp, shield, schedule, do_command, wait) with per-kind payload field decode | —                                      |
 | `command`        | PTZ presets 2201-2456, action sets 33203-33210, brightness/contrast/gain ranges, PTZ speed/outputs, ~60 individual codes | any code not in jaydeel's table        |
 | `web_proto1`     | 0=http, 1=https, 2=mqtt (full; no TCP option exists)                            | —                                      |
 | `run_action`     | 0=run_program, 1=write_file_append, 2=write_file_replace, 3=delete_file         | —                                      |
 | `trig_allzones`  | 0=exact, 1=all, 2=any                                                           | —                                      |
 | `profiles`       | bits 0-6 → profiles 0-6 (profile 0 = "Inactive"); legacy sentinel 46 = no profiles | —                                  |
 | `trig_zones`     | bits 0-7 → zones A-H (H = Hotspot)                                              | —                                      |
-| `diobits`        | bits 0-31 → DIO 1-32                                                            | —                                      |
+| `diobits`        | bits 0-31 → DIO 1-32, decoded into `filters.dio_trigger_gate` on **every** row as a per-row trigger gate (independent from `type=7`'s `dio_number` output channel) | —                  |
 | `trig_source`    | bits 1,2,3,4,5,6,14 (motion, onvif, audio, external, dio, group, ai) decoded into a list; `trig_source_raw` preserved | bit 7 (=128) observed in our exports but unnamed by jaydeel |
+| `source` (type=9)| 1=specific_file, 2=group_image, 3=current_camera_image, 4=alert_media (alert-image vs alert-MP4 disambiguated via `mp4sec`/`mp4audio`) | —                                      |
+| `mode` (type=13) | 3-bit OR'd bitmask: bit 0=queues_empty, bit 1=no_longer_triggered, bit 2=retriggered (empty list = wait full `breaktime` unconditionally) | —                                      |
 
 Unmapped values fall through as `type: "unknown"` / `command_raw: <int>` /
 `protocol: "unknown"` — the original dict is always preserved under `raw`, so
 the tool never loses data. When adding a new mapping, edit the tables at the
 top of `shapers.shape_actionset` (`_ACTION_TYPE`, `_WEB_PROTO`,
 `_RUN_ACTION`, `_DOCMD_INDIVIDUAL`, `_decode_command`, etc.).
-
-**Known field hint** (from ipcamtalk research, 2026-05-17): Sound actions
-store their audio file path under `Alerts\OnTrigger\<N>\soundPath`. When the
-Sound action's `type` integer is identified during Pass 2, that field is
-where the path lives.
 
 ### Future extension: Watchdog action sets
 
