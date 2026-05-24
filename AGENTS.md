@@ -332,6 +332,28 @@ e.g. "delete all alerts from yesterday" — the answer is that bi-mcp
 deliberately doesn't expose `delalert`/`delclip`/`moveclip`. Point them
 at the BI UI.
 
+### Rule 5.5 — Mutating tools execute operator decisions; they never pick target values
+
+Every shipped mutating tool takes the target value from the caller:
+`bi_set_profile(profile=…)`, `bi_set_ptz_preset(preset=…)`,
+`bi_set_camera(op=…, …)`, `bi_update_record(memo=…, flags=…)`,
+`bi_export_clip(path=…, startms=…)`, `bi_trigger_camera(camera=…)`.
+The operator decides what's correct; the tool applies it.
+
+A mutating tool that *picks* the target value — "audit found drift,
+auto-resolve by writing the cohort majority" — is out of scope. The
+majority isn't necessarily correct (a single outlier camera may have
+narrower profiles on purpose). Surface the deviation and stop.
+
+The matching read-side pattern: tools like `bi_audit_actions` and
+`bi_get_actionset` report state without ranking values. They show
+"SecCam_2 has profiles=[1,2,3], other 9 cameras have [1..6]" — not
+"SecCam_2 is wrong."
+
+When proposing a new tool, ask: does this require the agent to choose
+what the right value is? If yes, redesign it so the caller passes
+the choice — or stop at surfacing the question.
+
 ### Rule 6.5 — `bi_export_clip` lifecycle ends outside the export queue
 
 Verified live 2026-05-18: a small (5s) export completes in <8s on this
