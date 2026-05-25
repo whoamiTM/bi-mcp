@@ -27,6 +27,7 @@ def _tool_get_reg(client: BiClients, args: dict) -> Any:
             "bi_get_reg requires a 'camera' argument (camera short name, e.g. 'SecCam_3')"
         )
     key_path = args.get("key_path") or args.get("key") or None
+    include_masks = bool(args.get("include_masks", False))
     parsed, age_days = reg_mod.parse_reg(short, key_path=key_path)
     if args.get("raw"):
         return {
@@ -34,7 +35,12 @@ def _tool_get_reg(client: BiClients, args: dict) -> Any:
             "mtime_age_days": age_days,
             "data": parsed,
         }
-    return shapers.shape_reg(parsed, camera_short=short, mtime_age_days=age_days)
+    return shapers.shape_reg(
+        parsed,
+        camera_short=short,
+        mtime_age_days=age_days,
+        include_masks=include_masks,
+    )
 
 
 def register() -> None:
@@ -70,6 +76,15 @@ def register() -> None:
                         "'Motion\\\\1' = profile 2; 'Motion\\\\2' = profile 3; "
                         "etc. AI\\\\<N> and PTZ\\\\Presets\\\\<N> use straight "
                         "1:1 indexing, NOT this offset."
+                    ),
+                },
+                "include_masks": {
+                    "type": "boolean",
+                    "description": (
+                        "Include `maskbits_*` hex blobs in the response. "
+                        "Default false — each blob is ~9KB and a full "
+                        "`PTZ\\\\Presets` read can exceed 250KB. Set true "
+                        "when you specifically need the polygon bytes."
                     ),
                 },
             },

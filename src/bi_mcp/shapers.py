@@ -17,6 +17,7 @@ Reference: ``BlueIris_Manual.md`` § *JSON Interface* (line 8353+).
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -69,16 +70,51 @@ def shape_session_info(login_data: dict[str, Any]) -> dict[str, Any]:
     return _drop_empty(out)
 
 
-def shape_status(raw: Any) -> dict[str, Any]:
-    """Shape the `status` response — system state snapshot."""
+def shape_status(raw: Any, profiles: list[str] | None = None) -> dict[str, Any]:
+    """Shape the `status` response — system state snapshot.
+
+    When ``profiles`` is supplied (the array from ``bi_get_session``'s login
+    payload, 0-indexed where element 0 is "Inactive"), resolve the bare
+    ``profile`` int to a ``profile_name`` string alongside it. The raw int
+    is preserved untouched. Out-of-range, negative, non-int, or missing
+    inputs leave ``profile_name`` absent rather than guessing.
+    """
     if not isinstance(raw, dict):
         return {"raw": raw}
-    # Most fields are useful; just convert any epoch timestamps we recognise.
-    return _replace_ts(raw, ("warnings", "lastupdate"))
+    out = _replace_ts(raw, ("warnings", "lastupdate"))
+    profile = raw.get("profile")
+    if (
+        isinstance(profiles, list)
+        and isinstance(profile, int)
+        and not isinstance(profile, bool)
+        and 0 <= profile < len(profiles)
+    ):
+        out["profile_name"] = profiles[profile]
+    return out
+
+
+_STALE_WHEN_DISABLED_KEYS = ("nAlerts", "nTriggers", "nClips", "nNoSignal", "ManRecElapsed")
 
 
 def shape_camlist(raw: Any, limit: int | None = None) -> list[dict[str, Any]]:
-    """Shape the `camlist` response — array of cameras."""
+    """Shape the `camlist` response — array of cameras.
+
+    Counter semantics (per BI manual § *camlist*, lines 8702-8721):
+      * ``nAlerts``, ``nTriggers``, ``nClips``, ``nNoSignal`` — camera-wide
+        counters since last reset. Live for enabled cameras; frozen at
+        whatever they were when a camera was disabled.
+      * ``newalerts`` — per-camera, per-user unread badge counter. Always
+        ``>= nAlerts`` because the two reset on different cadences
+        (``nAlerts`` only when stats are reset; ``newalerts`` as the user
+        clears the badge in the UI).
+      * ``ManRecElapsed`` — seconds elapsed in the current manual-record
+        session; frozen on disable.
+
+    For disabled cameras (``isEnabled == False``), the four ``n*`` counters
+    and ``ManRecElapsed`` are moved under a ``stale_when_disabled`` sub-dict
+    so callers don't misread them as live state. Enabled cameras keep all
+    fields at top level. Keys absent in the input are not synthesized.
+    """
     if not isinstance(raw, list):
         return [{"raw": raw}]
     out: list[dict[str, Any]] = []
@@ -86,6 +122,14 @@ def shape_camlist(raw: Any, limit: int | None = None) -> list[dict[str, Any]]:
         if not isinstance(cam, dict):
             continue
         shaped = _replace_ts(cam, ("lastalertutc", "newalertsutc"))
+        if shaped.get("isEnabled") is False:
+            stale = {
+                k: shaped[k] for k in _STALE_WHEN_DISABLED_KEYS if k in shaped
+            }
+            if stale:
+                for k in stale:
+                    del shaped[k]
+                shaped["stale_when_disabled"] = stale
         out.append(_drop_empty(shaped))
     if limit is not None:
         out = out[: max(0, int(limit))]
@@ -299,7 +343,71 @@ def shape_ptz_status(raw: Any) -> Any:
             active["description"] = preset_map[presetnum]
         out["active_preset"] = active
 
+    inconsistencies = _ptz_preset_inconsistencies(presets_in)
+    if inconsistencies:
+        out["preset_inconsistencies"] = inconsistencies
+
     return _drop_empty(out)
+
+
+_PRESET_DESC_RE = re.compile(r"^Preset\s*(\d+)$", re.IGNORECASE)
+
+
+def _ptz_preset_inconsistencies(presets_in: Any) -> list[dict[str, Any]]:
+    """Flag presets whose numbering hints at slot drift.
+
+    Two heuristics, both informational only:
+      1. Dict-form entries whose ``num`` field disagrees with the
+         1-indexed position.
+      2. String- or dict-form entries whose description matches
+         ``^Preset\\s*(\\d+)$`` and the captured digit differs from the
+         slot number — typically the result of an earlier preset being
+         deleted without renumbering.
+
+    Returns an empty list when no inconsistencies are detected. Named
+    presets (e.g. "SecCam_1") never match the regex and so never flag.
+    """
+    if not isinstance(presets_in, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for i, entry in enumerate(presets_in):
+        slot = i + 1
+        if isinstance(entry, str):
+            desc, num = entry, None
+        elif isinstance(entry, dict):
+            desc = entry.get("desc", "") or ""
+            num = entry.get("num")
+            try:
+                num = int(num) if num is not None else None
+            except (TypeError, ValueError):
+                num = None
+        else:
+            continue
+
+        if num is not None and num != slot:
+            out.append({
+                "slot": slot,
+                "num": num,
+                "desc": desc,
+                "hint": f"preset has num={num} but is stored at slot {slot}",
+            })
+            continue
+
+        m = _PRESET_DESC_RE.match(desc.strip()) if isinstance(desc, str) else None
+        if m:
+            implied = int(m.group(1))
+            if implied != slot:
+                entry_out: dict[str, Any] = {
+                    "slot": slot,
+                    "desc": desc,
+                    "hint": (
+                        f"description suggests preset {implied} but it's "
+                        f"stored at slot {slot} — likely an earlier preset "
+                        "was deleted without renumbering"
+                    ),
+                }
+                out.append(entry_out)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -667,7 +775,12 @@ def _annotate_profile_sync_passthroughs(parsed: dict[str, Any]) -> dict[str, Any
     return out
 
 
-def shape_reg(parsed: dict[str, Any], camera_short: str, mtime_age_days: float) -> dict[str, Any]:
+def shape_reg(
+    parsed: dict[str, Any],
+    camera_short: str,
+    mtime_age_days: float,
+    include_masks: bool = False,
+) -> dict[str, Any]:
     """Shape the parsed .reg hive output.
 
     ``parsed`` is the dict produced by ``reg.py::parse_reg`` (keyed by hive
@@ -680,7 +793,16 @@ def shape_reg(parsed: dict[str, Any], camera_short: str, mtime_age_days: float) 
     live config. The input ``parsed`` dict is not mutated — passthrough
     entries are shallow-copied before annotation. See
     `_annotate_profile_sync_passthroughs`.
+
+    When ``include_masks`` is False (the default), ``maskbits_*`` binary
+    blobs have their ``hex`` field stripped and replaced with
+    ``_omitted: "hex"`` so a single ``PTZ\\Presets`` read doesn't blow
+    token budgets. Set ``include_masks=True`` to get the full polygon
+    bytes back; ``raw=true`` at the tool layer also bypasses this.
     """
+    data = _annotate_profile_sync_passthroughs(parsed)
+    if not include_masks:
+        data = _strip_maskbits_hex(data)
     return _drop_empty(
         {
             "camera": camera_short,
@@ -688,9 +810,42 @@ def shape_reg(parsed: dict[str, Any], camera_short: str, mtime_age_days: float) 
                 "mtime_age_days": round(mtime_age_days, 2),
                 "stale": mtime_age_days > 7.0,
             },
-            "data": _annotate_profile_sync_passthroughs(parsed),
+            "data": data,
         }
     )
+
+
+def _strip_maskbits_hex(data: dict[str, Any]) -> dict[str, Any]:
+    """Return a new dict where any value at a ``maskbits_*`` key matching
+    the reg parser's binary shape (``{_type: "binary", hex, len}``) has
+    its hex replaced with ``_omitted: "hex"``. Non-``maskbits_*`` binaries
+    are left alone. Input is not mutated."""
+    out: dict[str, Any] = {}
+    for key, val in data.items():
+        if isinstance(val, dict):
+            out[key] = _strip_maskbits_in_subtree(val)
+        else:
+            out[key] = val
+    return out
+
+
+def _strip_maskbits_in_subtree(subtree: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for k, v in subtree.items():
+        if (
+            k.startswith("maskbits_")
+            and isinstance(v, dict)
+            and v.get("_type") == "binary"
+            and "hex" in v
+        ):
+            stripped = {kk: vv for kk, vv in v.items() if kk != "hex"}
+            stripped["_omitted"] = "hex"
+            out[k] = stripped
+        elif isinstance(v, dict):
+            out[k] = _strip_maskbits_in_subtree(v)
+        else:
+            out[k] = v
+    return out
 
 
 # ---------------------------------------------------------------------------

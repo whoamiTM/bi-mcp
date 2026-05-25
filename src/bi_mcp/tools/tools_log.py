@@ -175,7 +175,12 @@ def register() -> None:
             "  regex   — Python regex on entry.msg (IGNORECASE); xor with match\n"
             "  limit   — applied AFTER filtering (default 100)\n\n"
             "Returns {entries, scanned, matched, warning?}. `raw=true` bypasses "
-            "the envelope and shaper. Admin required."
+            "the envelope and shaper. Admin required.\n\n"
+            "BI aggregates repeated messages: `count` is cumulative since BI "
+            "startup (or last log clear), and `date` is when BI **last summed** "
+            "the entry, not necessarily the most recent occurrence. To tell "
+            "whether a message is actively firing now, re-query with a tight "
+            "since=-5m window."
         ),
         schema={
             "type": "object",

@@ -42,7 +42,22 @@ def _tool_get_status(client: BiClients, args: dict) -> Any:
     raw = client.call("status")
     if args.get("raw"):
         return raw
-    return shapers.shape_status(raw)
+    # Resolve the bare `profile` int against the session's profile names so
+    # callers see `profile_name: "Active/Day"` next to `profile: 1`. Login
+    # lazily if we haven't pulled session data yet this process. Enrichment
+    # is best-effort: if the login probe fails, return shaped status without
+    # `profile_name` rather than discarding a successful status read.
+    profiles = None
+    try:
+        if not client.login_data:
+            client.login()
+        if isinstance(client.login_data, dict):
+            candidate = client.login_data.get("profiles")
+            if isinstance(candidate, list):
+                profiles = candidate
+    except Exception:
+        profiles = None
+    return shapers.shape_status(raw, profiles=profiles)
 
 
 # ---------------------------------------------------------------------------
