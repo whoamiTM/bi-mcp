@@ -1,16 +1,29 @@
-"""Cross-camera action-set drift audit.
+"""Cross-camera action-set cohort-divergence audit.
 
 bi_audit_actions walks every camera's .reg export, runs each through
 shape_actionset, then groups action rows into cohorts by a structural
 signature (action type + description + a type-specific discriminator like
 the PTZ ``command`` int or the ``<CAM>``-templated MQTT path). Within each
-cohort it computes the modal value of every leaf field and flags rows
-whose value differs.
+cohort it computes the modal value of every leaf field and reports rows
+whose value differs as ``outliers``.
 
-The intent is to surface silent BI configuration drift — typos like
-``"Person"`` vs ``"person"``, a stale ``trig_source`` bit, a row left
-``enabled: 0`` — that ride through unchallenged because BI doesn't
-validate action rows at save time.
+This is an **informational** tool — outliers are NOT necessarily bugs.
+They are simply values that deviate from how most cameras in the cohort
+are configured. Outliers fall into two categories:
+
+  1. **Intentional per-camera customizations** — e.g. one camera's MQTT
+     action filters out motion-source triggers because that camera fires
+     too often on motion, or one camera fires on a narrower profile set
+     because it covers a different schedule.
+  2. **Genuine misconfigurations** — typos like ``"Person"`` vs
+     ``"person"``, a row left ``enabled: 0`` by accident, a stale
+     ``trig_source`` bit from an old config.
+
+The tool can't tell which is which from .reg data alone — the user
+knows their intent. Consumers should present outliers as "values worth
+reviewing" and ask the user to confirm intent, NOT as bugs to fix. (See
+``feedback_known_intentional_outliers`` in project memory if it exists
+for items already reviewed.)
 
 Pure-read: no JSON API calls, no admin gating. Source data is the same
 .reg exports ``bi_get_actionset`` consumes; results are only as fresh as
@@ -36,13 +49,13 @@ _VALID_HOOKS = ("on_trigger", "on_reset", "both")
 _DEFAULT_MIN_COHORT = 3
 
 # Fields that are part of the row identity, not the value space being
-# audited. Excluded from drift comparison.
+# audited. Excluded from outlier comparison.
 _IDENTITY_FIELDS = frozenset({"index", "type", "description", "raw"})
 
 # Raw-row fields the shaper normalizes (e.g. case-folds) before exposing
 # them. The audit re-surfaces them under ``raw.<name>`` paths so
-# normalization-masked drift (typos like "Person" vs "person") still
-# gets flagged.
+# normalization-masked divergences (typos like "Person" vs "person")
+# still get flagged.
 _RAW_FIELDS_TO_AUDIT = ("trig_object", "trig_skip", "descript")
 
 # Per-action-kind "identity hint" — the field most likely to identify
@@ -50,7 +63,7 @@ _RAW_FIELDS_TO_AUDIT = ("trig_object", "trig_skip", "descript")
 # distinguishing description. Used ONLY to compute a soft signature for
 # the unbucketed cross-reference hint; never for primary cohort
 # bucketing (a wrong guess here just produces a less-useful hint, not
-# corrupted drift output). Action kinds absent from this map get no
+# corrupted outlier output). Action kinds absent from this map get no
 # soft-signature hint.
 _SOFT_KIND_KEY: dict[str, tuple[str, ...]] = {
     "email": ("to",),
@@ -68,7 +81,7 @@ _SOFT_KIND_KEY: dict[str, tuple[str, ...]] = {
 def _camera_short_token(value: Any, short: str) -> Any:
     """Substitute a camera's short name with the ``<CAM>`` token inside
     string values so per-camera paths like ``ai/SecCam_3/motion`` don't
-    false-positive as drift.
+    false-positive as outliers.
 
     Uses word-boundary matching to avoid mangling prefix-overlapping
     names: substituting ``SecCam_1`` inside ``ai/SecCam_10/motion`` must
@@ -120,7 +133,7 @@ def _soft_signature(
 def _row_signature(row: dict[str, Any], short: str, hook_name: str) -> tuple:
     """Bucket key for cohort grouping. Same signature → same logical row
     across cameras. ``description`` is lowercased so a typo'd description
-    still buckets together (and surfaces as a drift finding on its own).
+    still buckets together (and surfaces as an outlier on its own).
 
     ``hook_name`` (``"on_trigger"`` / ``"on_reset"``) is part of the
     signature: OnTrigger and OnReset rows are different logical rule sets
@@ -295,7 +308,7 @@ def _audit(
         # copies doesn't overweight modal voting against cameras with
         # one. If a camera's duplicates disagree on a field, that
         # camera's vote for that field becomes "inconsistent" and is
-        # surfaced as its own finding rather than polluting drift.
+        # surfaced as its own finding rather than polluting outliers.
         per_camera: dict[str, list[tuple[str, dict[str, Any], dict[str, Any]]]] = (
             defaultdict(list)
         )
@@ -305,7 +318,7 @@ def _audit(
         # Every field path that appears in at least one member.
         all_paths = sorted({p for _, _, _, lv in member_leaves for p in lv})
 
-        drift: list[dict[str, Any]] = []
+        outlier_findings: list[dict[str, Any]] = []
         disabled_outliers: list[dict[str, Any]] = []
         intra_camera_inconsistency: list[dict[str, Any]] = []
 
@@ -336,8 +349,8 @@ def _audit(
                         }
                     )
 
-            # Drift voting ignores INCONSISTENT votes — those are their
-            # own finding, not data for modal computation.
+            # Outlier voting ignores INCONSISTENT votes — those are
+            # their own finding, not data for modal computation.
             consistent_values = [v for _, v in votes if v is not _INCONSISTENT]
             if not consistent_values:
                 if inconsistent_cams:
@@ -348,10 +361,10 @@ def _audit(
 
             modal_val, modal_count = _modal(consistent_values)
             if modal_count == len(consistent_values) and not inconsistent_cams:
-                continue  # unanimous and no inconsistent cameras; not drift
+                continue  # unanimous and no inconsistent cameras; nothing to report
             if modal_count <= len(consistent_values) // 2:
                 # No >50% majority among consistent voters; can't call
-                # any side "drift" — but inconsistent cameras still
+                # any side an outlier — but inconsistent cameras still
                 # warrant a finding if any.
                 if inconsistent_cams:
                     intra_camera_inconsistency.append(
@@ -384,7 +397,7 @@ def _audit(
                 if path == "enabled":
                     disabled_outliers.append(entry)
                 else:
-                    drift.append(entry)
+                    outlier_findings.append(entry)
             if inconsistent_cams:
                 intra_camera_inconsistency.append(
                     {"field": path, "cameras": inconsistent_cams}
@@ -399,7 +412,7 @@ def _audit(
             },
             "size": len(members),
             "members": member_ids,
-            "drift": drift,
+            "outliers": outlier_findings,
             "disabled_outliers": disabled_outliers,
             "_raw_members": members,
         }
@@ -574,15 +587,22 @@ def register() -> None:
         "bi_audit_actions",
         _tool_audit_actions,
         description=(
-            "Walk every camera's .reg export, bucket action rows into "
-            "cohorts by (type, description, type-specific key), and flag "
-            "fields where one camera deviates from the cohort's modal "
-            "value. Per-camera path tokens (e.g. 'ai/SecCam_3/motion') "
-            "are templated to '<CAM>' before comparison so legitimate "
-            "per-camera substitution doesn't false-positive. The 'enabled' "
-            "field drifts are reported separately under 'disabled_outliers' "
-            "so a row left disabled by accident is easy to spot. Pure "
-            "read; no live BI connection."
+            "**Informational tool** — surfaces cross-camera action-row "
+            "outliers for user review. Walks every camera's .reg export, "
+            "buckets action rows into cohorts by (type, description, "
+            "type-specific key), and reports fields where one camera's "
+            "value deviates from the cohort's modal value under "
+            "'outliers'. Per-camera path tokens (e.g. 'ai/SecCam_3/"
+            "motion') are templated to '<CAM>' before comparison so "
+            "legitimate per-camera substitution doesn't false-positive. "
+            "The 'enabled' field is reported separately under "
+            "'disabled_outliers' so a row left disabled by accident is "
+            "easy to spot. **Outliers are NOT necessarily bugs** — they "
+            "may be intentional per-camera customizations (e.g. one "
+            "camera filtering different trigger sources, or running a "
+            "narrower profile set). Present findings to the user as "
+            "'values worth confirming' and ask whether each is "
+            "intentional. Pure read; no live BI connection."
         ),
         schema={
             "type": "object",
@@ -608,7 +628,7 @@ def register() -> None:
                     "type": "integer",
                     "minimum": 2,
                     "description": (
-                        "Minimum cohort size before drift is computed. "
+                        "Minimum cohort size before outliers are computed. "
                         "Cohorts smaller than this are listed under "
                         "'unbucketed' for visibility but not analyzed. "
                         "Default 3."
@@ -617,5 +637,5 @@ def register() -> None:
             },
             "additionalProperties": True,
         },
-        annotations={"readOnlyHint": True, "title": "Audit BI action-set drift"},
+        annotations={"readOnlyHint": True, "title": "Audit BI action-set cohort divergences"},
     )

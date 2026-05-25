@@ -65,7 +65,7 @@ For static facts (camera → IP, role, friendly name), do **not** call
 | `bi_list_log`           | `log`        |   ✓    |           | System log entries with filters (since/camera/obj/levels/match/regex). Returns {entries, scanned, matched, warning?} |
 | `bi_get_reg`            | (file)       |        |           | .reg hive parse — for what the API can't reach                 |
 | `bi_get_actionset`      | (file)       |        |           | Semantic view of Alerts\\OnTrigger / OnReset (decoded)         |
-| `bi_audit_actions`      | (file)       |        |           | Cross-camera drift report — buckets action rows by (type, description, type-specific key) and flags fields where one row deviates from the cohort majority. Templates per-camera tokens (`ai/<CAM>/motion`) before comparison. Re-surfaces raw `trig_object`/`trig_skip` to catch case-sensitivity typos the shaper would otherwise normalize away. |
+| `bi_audit_actions`      | (file)       |        |           | Cross-camera cohort-divergence report — buckets action rows by (type, description, type-specific key) and surfaces fields where one row's value deviates from the cohort majority as `outliers`. **Informational only** — outliers may be intentional per-camera customizations; present findings for user review, not as bugs to fix. Templates per-camera tokens (`ai/<CAM>/motion`) before comparison. Re-surfaces raw `trig_object`/`trig_skip` to catch case-sensitivity differences the shaper would otherwise normalize away. |
 | `bi_trigger_camera`     | `trigger`    |   ✓    |     ✓     | Fire a synthetic motion trigger                                |
 | `bi_set_ptz_preset`     | `ptz` (cmd)  |        |     ✓     | Recall a PTZ preset (1-20)                                     |
 | `bi_set_profile`        | `status` set |   ✓    |     ✓     | Switch active profile                                          |
@@ -340,10 +340,11 @@ Every shipped mutating tool takes the target value from the caller:
 `bi_export_clip(path=…, startms=…)`, `bi_trigger_camera(camera=…)`.
 The operator decides what's correct; the tool applies it.
 
-A mutating tool that *picks* the target value — "audit found drift,
+A mutating tool that *picks* the target value — "audit found an outlier,
 auto-resolve by writing the cohort majority" — is out of scope. The
 majority isn't necessarily correct (a single outlier camera may have
-narrower profiles on purpose). Surface the deviation and stop.
+narrower profiles on purpose). Surface the deviation, ask the user to
+confirm intent, and stop.
 
 The matching read-side pattern: tools like `bi_audit_actions` and
 `bi_get_actionset` report state without ranking values. They show

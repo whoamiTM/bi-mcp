@@ -178,7 +178,7 @@ mutation-safety rules, see [AGENTS.md](AGENTS.md).
 | `bi_list_log` | `log` | ✓ | | Recent BI system log entries. |
 | `bi_get_reg` | (file parser) | | | Parse `.reg` camera export — trigger zones, AI thresholds, per-preset flags. |
 | `bi_get_actionset` | (file parser) | | | Decoded semantic view of `Alerts\OnTrigger` / `OnReset` action rows. |
-| `bi_audit_actions` | (file parser) | | | Cross-camera drift report — flags action-row fields that deviate from the cohort majority. |
+| `bi_audit_actions` | (file parser) | | | Cross-camera cohort-divergence report — surfaces action-row outliers (values that differ from the cohort majority) for user review. Outliers may be intentional per-camera customizations, not bugs. |
 | `bi_explain_alert_chain` | `clipstats` + `log` + (file) | ✓ | | Diagnose one alert: alert facts, per-row filter decode, comparator verdicts for compound/threshold/wait/cross-zone cases, and a ±2-minute log cross-reference of what BI actually did. Refuses alerts older than 24h by default (override with `max_alert_age_h`). |
 | `bi_trigger_camera` | `trigger` | ✓ | ✓ | Fire a synthetic motion trigger (mutations flag). |
 | `bi_set_ptz_preset` | `ptz` (cmd) | | ✓ | Recall a PTZ preset 1-20 (mutations flag). |
