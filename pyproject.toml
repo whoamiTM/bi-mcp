@@ -30,6 +30,15 @@ dependencies = [
 [project.scripts]
 bi-mcp-server = "bi_mcp.__main__:main"
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
 [project.urls]
 Homepage = "https://github.com/whoamiTM/bi-mcp"
 Issues = "https://github.com/whoamiTM/bi-mcp/issues"
