@@ -567,19 +567,22 @@ name rather than expecting prefix-match magic.
 ## Tests as a fixture-gap todo list
 
 The pytest suite under `tests/unit/` runs via an advisory PostToolUse hook
-(loud on fail, silent on pass, never blocks). A small number of tests are
-intentionally left red as a self-describing reminder of work to do — e.g.
-`test_fixture_covers_all_14_action_types` will keep failing until
-`clone_seccam_10_test.reg` is re-exported with a `do_command` row. The
-failure message names exactly what's missing, so future-you sees the
-todo every time the suite runs.
+(loud on fail, silent on pass, never blocks). When a test is intentionally
+left red as a self-describing reminder of work to do, the failure message
+should name exactly what's missing so future-you sees the todo every time
+the suite runs.
 
-This pattern only works while known-stuck failures stay rare. **If the
-count of intentionally-failing tests grows past ~3, convert them to
-`pytest.mark.xfail(strict=True)`** — that keeps the suite green for real
-regressions while still flipping to `XPASS`-fail the moment the gap is
-closed. Without that conversion, red-as-a-todo blurs into noise and real
-regressions get missed.
+Prefer **walk-the-production-hives** style assertions over synthetic
+fixtures where possible (see `test_production_hives_cover_every_mapped_action_type`).
+Real `.reg` exports renew themselves as the install evolves; a synthetic
+fixture freezes the moment it's committed and drifts from reality.
+
+This red-as-todo pattern only works while known-stuck failures stay rare.
+**If the count of intentionally-failing tests grows past ~3, convert them
+to `pytest.mark.xfail(strict=True)`** — that keeps the suite green for
+real regressions while still flipping to `XPASS`-fail the moment the gap
+is closed. Without that conversion, red-as-a-todo blurs into noise and
+real regressions get missed.
 
 ---
 
