@@ -596,12 +596,90 @@ def shape_camera_set_result(
     return out
 
 
+# Per-profile pages where BI exposes the "Sync this profile with profile 1"
+# checkbox at the top of the tab. When that box is checked, BI either omits
+# the `<Page>\<N>` subkey entirely OR writes it with `sync: 1, camsync: ""`
+# — in both cases the live config for profile N is whatever `<Page>\1` (or
+# `<Page>` with no number, for Motion's off-by-one quirk) contains.
+#
+# When the box is unchecked, BI writes `sync: 0` and the subkey's fields
+# become the live config for profile N.
+#
+# Cross-camera sync (a different mechanism) lives on profile 1 with
+# `camsync: "<other_cam>"`; that is NOT a passthrough and is not flagged.
+#
+# Motion uses an off-by-one numbering quirk ("legacy reasons", per
+# reg.py docstring): `Motion` (no number) is profile 1, `Motion\1` is
+# profile 2, etc. The other pages use straight 1:1 indexing. So for
+# Motion we annotate from `Motion\1` upward; for the others, from
+# `<Page>\2` upward.
+_PROFILE_SYNC_PAGES = ("Alerts", "Motion", "AI", "Clips", "Watchdog")
+_PROFILE_SYNC_MIN_N: dict[str, int] = {
+    "Motion": 1,  # Motion\1 == profile 2
+    # Other pages default to 2 (handled below).
+}
+
+
+def _is_profile_sync_passthrough(key: str, val: Any) -> bool:
+    """Return True iff `<key, val>` represents a sync-with-profile-1
+    passthrough (profile >= 2 under a per-profile page, with `sync == 1`
+    and empty `camsync`).
+
+    See `_annotate_profile_sync_passthroughs` for the encoding context.
+    """
+    if not isinstance(val, dict):
+        return False
+    parts = key.split("\\")
+    if len(parts) != 2:
+        return False
+    page, tail = parts
+    if page not in _PROFILE_SYNC_PAGES:
+        return False
+    if not tail.isdigit():
+        return False
+    if int(tail) < _PROFILE_SYNC_MIN_N.get(page, 2):
+        return False
+    return val.get("sync") == 1 and val.get("camsync", "") == ""
+
+
+def _annotate_profile_sync_passthroughs(parsed: dict[str, Any]) -> dict[str, Any]:
+    """Return a new outer dict where passthrough subkey values are
+    shallow-copied with `_synced_with: "profile_1"` added. Non-passthrough
+    values are reused by reference — the input dict and its inner dicts
+    are NOT mutated, so callers can safely reuse `parsed` afterward.
+
+    A passthrough is identified by `sync == 1` AND empty `camsync` on a
+    profile-N subkey for N >= 2 (where Motion's off-by-one quirk means
+    N >= 1 under the `Motion` page). The real config for these profiles
+    lives in `<Page>\\1` (or in `Motion` with no number, for the Motion
+    quirk). Subkeys ABSENT from the hive are also passthroughs (BI's
+    default state for new profiles), but we can't annotate what isn't
+    there.
+    """
+    out: dict[str, Any] = {}
+    for key, val in parsed.items():
+        if _is_profile_sync_passthrough(key, val):
+            copy = dict(val)
+            copy["_synced_with"] = "profile_1"
+            out[key] = copy
+        else:
+            out[key] = val
+    return out
+
+
 def shape_reg(parsed: dict[str, Any], camera_short: str, mtime_age_days: float) -> dict[str, Any]:
     """Shape the parsed .reg hive output.
 
     ``parsed`` is the dict produced by ``reg.py::parse_reg`` (keyed by hive
     subpath). We attach a top-level ``meta`` block with the camera name, the
     file mtime age in days, and a ``stale`` flag for the warning path.
+
+    Profile-N (N>=2) subkeys under Alerts/Motion/AI/Clips/Watchdog get a
+    `_synced_with: "profile_1"` marker when they're sync-with-profile-1
+    passthroughs, so callers don't misread their stale field values as the
+    live config. The input ``parsed`` dict is not mutated — passthrough
+    entries are shallow-copied before annotation. See
+    `_annotate_profile_sync_passthroughs`.
     """
     return _drop_empty(
         {
@@ -610,7 +688,7 @@ def shape_reg(parsed: dict[str, Any], camera_short: str, mtime_age_days: float) 
                 "mtime_age_days": round(mtime_age_days, 2),
                 "stale": mtime_age_days > 7.0,
             },
-            "data": parsed,
+            "data": _annotate_profile_sync_passthroughs(parsed),
         }
     )
 
