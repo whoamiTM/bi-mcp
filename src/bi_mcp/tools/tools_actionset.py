@@ -8,8 +8,8 @@ and Alerts\\OnReset\\<N>, and contain integer-coded fields (`type`, `command`,
 bi_get_reg already returns this data raw; bi_get_actionset wraps it with a
 decoder layer derived empirically from this install (Pass 1, 2026-05-17),
 extended against jaydeel's authoritative decoder tables on ipcamtalk thread
-85627 (2026-05-21). Remaining unknowns: bit 7 of `trig_source`, and
-per-type payload field names for action kinds we haven't exercised in the UI.
+85627 (2026-05-21). Remaining unknown: per-type payload field names for
+action kinds we haven't exercised in the UI (decodable by .reg-diffing).
 See shapers.shape_actionset for the decoder tables.
 """
 

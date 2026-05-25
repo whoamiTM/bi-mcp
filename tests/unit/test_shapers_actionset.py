@@ -178,3 +178,81 @@ def test_production_hives_decode_with_no_unknown_types(reg_venv_available: bool)
     assert not offenders, (
         f"{len(offenders)} action row(s) decoded as 'unknown': {offenders}"
     )
+
+
+# ---------------------------------------------------------------------------
+# trig_source bit 7 regression — see reference_bi_trig_source_bit7 memory
+# ---------------------------------------------------------------------------
+
+
+def test_trig_source_raw_preserves_bit7_decoded_list_excludes_it(
+    reg_venv_available: bool,
+) -> None:
+    """trig_source contract across production hives:
+
+    - `trig_source_raw` is the unmodified BI value (bit 7 still set if BI
+      set it) so bi_audit_actions can flag any row where bit 7 *isn't*
+      set — that would invalidate the "always set" assumption in
+      reference_bi_trig_source_bit7.md.
+    - `trig_source` (decoded list) only contains UI-mapped sources; bit
+      7 is not in `_TRIG_SOURCE_BITS` and must never appear in the list.
+
+    If a future BI version starts toggling bit 7, this test still passes
+    (raw stays raw) but `bi_audit_actions` will surface the divergence.
+    The test fails only if someone re-introduces a mask before raw
+    assignment, or accidentally adds bit 7 to the decoded label map.
+    """
+    if not reg_venv_available:
+        pytest.skip(".reg-venv not present")
+
+    valid_source_labels = {"motion", "onvif", "audio", "external", "dio", "group", "ai"}
+    rows_with_trig_source = 0
+    bit7_set_count = 0
+
+    for short in list_reg_cameras():
+        try:
+            parsed, age_days = parse_reg(short, key_path="Alerts")
+        except BiNotFound:
+            continue
+        shaped = shape_actionset(parsed, camera_short=short,
+                                 mtime_age_days=age_days, hook="both")
+        for block_name in ("on_trigger", "on_reset"):
+            block = shaped.get(block_name)
+            if not block:
+                continue
+            for action in block["actions"]:
+                filters = action.get("filters")
+                if not filters or "trig_source_raw" not in filters:
+                    continue
+                rows_with_trig_source += 1
+                raw = filters["trig_source_raw"]
+                # Must be the unmodified int BI stored (no masking).
+                assert isinstance(raw, int), (
+                    f"{short} row {action.get('index')}: trig_source_raw "
+                    f"should be int, got {type(raw).__name__}"
+                )
+                if raw & 0b10000000:
+                    bit7_set_count += 1
+                # Decoded list (if present) must only contain known labels —
+                # bit 7 has no label, so it must never leak through.
+                decoded = filters.get("trig_source", [])
+                stray = set(decoded) - valid_source_labels
+                assert not stray, (
+                    f"{short} row {action.get('index')}: decoded trig_source "
+                    f"contains unmapped label(s) {stray} (raw={raw})"
+                )
+
+    # Sanity: the production hives must actually exercise this field, or
+    # the test above is vacuous. As of 2026-05-25 all 170 observed rows
+    # have bit 7 set — if that ever drops to zero, the "always set"
+    # assumption is broken and reference_bi_trig_source_bit7.md needs
+    # revisiting (audit tooling will flag it independently).
+    assert rows_with_trig_source > 0, (
+        "no rows with trig_source seen across production hives — test is vacuous"
+    )
+    assert bit7_set_count == rows_with_trig_source, (
+        f"bit 7 was clear on {rows_with_trig_source - bit7_set_count} of "
+        f"{rows_with_trig_source} rows — the 'always set' assumption in "
+        f"reference_bi_trig_source_bit7.md is broken. Re-investigate what "
+        f"bit 7 actually represents before relying on the mask."
+    )

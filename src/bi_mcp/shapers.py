@@ -748,9 +748,13 @@ _TRIG_ALLZONES: dict[int, str] = {
 }
 
 # trig_source bitmask — which trigger sources fire this action.
-# Source: jaydeel ipcamtalk thread 85627 (2026-05-21). Bit 7 observed in our
-# exports (e.g. 132 = 4|128, 16514 = 2|128|16384) but unnamed by jaydeel —
-# keep `trig_source_raw` alongside the decoded list until identified.
+# Source: jaydeel ipcamtalk thread 85627 (2026-05-21). The 7 named bits
+# (Motion/ONVIF/Audio/External/DIO/Group/AI) account for every trigger-source
+# checkbox in the BI alert-editor UI. Bit 7 (=128) is set on 100% of observed
+# rows and corresponds to NO UI control — it's a BI-internal flag (probably
+# row-enabled or schema-version). Masked out before decoding so it doesn't
+# pollute the raw audit value.
+_TRIG_SOURCE_INTERNAL_MASK = 0b10000000  # bit 7
 _TRIG_SOURCE_BITS: dict[int, str] = {
     1: "motion",
     2: "onvif",
@@ -902,12 +906,17 @@ def _shape_action_entry(idx: int, raw: dict[str, Any]) -> dict[str, Any]:
         filters["skip"] = raw["trig_skip"]
     if "trig_source" in raw:
         ts = raw["trig_source"]
-        decoded = _decode_bit_dict(ts, _TRIG_SOURCE_BITS)
-        # Only emit the decoded list when at least one bit decoded — empty
-        # would be ambiguous with "no sources set". Bit 7 (=128) is observed
-        # but unnamed; raw is always preserved for audit.
+        if isinstance(ts, int):
+            ts_for_decode = ts & ~_TRIG_SOURCE_INTERNAL_MASK
+        else:
+            ts_for_decode = ts
+        decoded = _decode_bit_dict(ts_for_decode, _TRIG_SOURCE_BITS)
         if decoded:
             filters["trig_source"] = decoded
+        # Preserve the original unmasked value so bi_audit_actions can
+        # surface any row where bit 7 is clear (invalidating the
+        # "always set" assumption documented in
+        # reference_bi_trig_source_bit7.md).
         filters["trig_source_raw"] = ts
     # diobits is a universal per-row DIO trigger-gate bitmask (channel N = bit
     # N-1). Distinct from type=7's dio_number (output channel the row drives).
@@ -1184,9 +1193,11 @@ def shape_actionset(
                 "decode (profiles, trig_zones, trig_allzones, trig_source, "
                 "diobits-as-trigger-gate); save (type=9) source enum with "
                 "alert-image/MP4 disambiguation; wait (type=13) continue-"
-                "when bitmask. Known gap: bit 7 of trig_source (preserved "
-                "as trig_source_raw). See bi-mcp/AGENTS.md for the full "
-                "table."
+                "when bitmask. trig_source bit 7 is a BI-internal flag "
+                "(no UI control) — masked out of the decoded list but "
+                "preserved in trig_source_raw so bi_audit_actions can "
+                "flag any row where the assumption breaks. See "
+                "bi-mcp/AGENTS.md for the full table."
             ),
         },
     }
