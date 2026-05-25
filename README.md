@@ -7,7 +7,7 @@ tools it needs (`bi_get_status`, `bi_get_camera_config`, `bi_list_alerts`,
 `bi_list_log`, `bi_get_reg`, …) and tells you what to change, citing the Blue
 Iris manual.
 
-**16 read-only tools** by default, plus **6 mutating tools**
+**17 read-only tools** by default, plus **6 mutating tools**
 (`bi_trigger_camera`, `bi_set_ptz_preset`, `bi_set_profile`, `bi_export_clip`,
 `bi_update_record`, `bi_set_camera`) that register only when
 `BI_MCP_ALLOW_MUTATIONS=1`. MIT-licensed.
@@ -98,8 +98,8 @@ and add an entry under `mcpServers`:
 }
 ```
 
-Restart Claude Code. The `bi_*` tools should now appear in your tool list (16
-read tools by default, 22 if `BI_MCP_ALLOW_MUTATIONS=1`).
+Restart Claude Code. The `bi_*` tools should now appear in your tool list (17
+read tools by default, 23 if `BI_MCP_ALLOW_MUTATIONS=1`).
 
 ## Verify it works
 
@@ -148,13 +148,13 @@ client tool-name caches, or shell scripts accordingly:
 | `bi_timeline`        | `bi_get_timeline`        |
 | `bi_ptz_status`      | `bi_get_ptz_status`      |
 
-The rename is deliberate — naming consistency across the now-22-tool surface
+The rename is deliberate — naming consistency across the now-23-tool surface
 matters more than one-time backward compatibility for a pre-1.0 server. If
 that tradeoff doesn't work for your install, stay on v0.1.0.
 
 ## Tool reference
 
-16 read tools register by default. The 6 mutating tools register only when
+17 read tools register by default. The 6 mutating tools register only when
 `BI_MCP_ALLOW_MUTATIONS=1`. Pass `raw=true` on any tool to get the unshaped
 Blue Iris JSON.
 
@@ -179,6 +179,7 @@ mutation-safety rules, see [AGENTS.md](AGENTS.md).
 | `bi_get_reg` | (file parser) | | | Parse `.reg` camera export — trigger zones, AI thresholds, per-preset flags. |
 | `bi_get_actionset` | (file parser) | | | Decoded semantic view of `Alerts\OnTrigger` / `OnReset` action rows. |
 | `bi_audit_actions` | (file parser) | | | Cross-camera drift report — flags action-row fields that deviate from the cohort majority. |
+| `bi_explain_alert_chain` | `clipstats` + `log` + (file) | ✓ | | Diagnose one alert: alert facts, per-row filter decode, comparator verdicts for compound/threshold/wait/cross-zone cases, and a ±2-minute log cross-reference of what BI actually did. Refuses alerts older than 24h by default (override with `max_alert_age_h`). |
 | `bi_trigger_camera` | `trigger` | ✓ | ✓ | Fire a synthetic motion trigger (mutations flag). |
 | `bi_set_ptz_preset` | `ptz` (cmd) | | ✓ | Recall a PTZ preset 1-20 (mutations flag). |
 | `bi_set_profile` | `status` (set) | ✓ | ✓ | Switch active profile (mutations flag). |
