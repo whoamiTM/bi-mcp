@@ -40,9 +40,7 @@ CLONE_FIXTURE_SHORT = "clone_seccam_10_test"
 
 
 @pytest.fixture(scope="module")
-def clone_actionset(reg_venv_available: bool) -> dict:
-    if not reg_venv_available:
-        pytest.skip(".reg-venv not present — install python-registry there to enable")
+def clone_actionset() -> dict:
     parsed, age_days = parse_reg(CLONE_FIXTURE_SHORT, key_path="Alerts")
     return shape_actionset(parsed, camera_short=CLONE_FIXTURE_SHORT,
                            mtime_age_days=age_days, hook="both")
@@ -87,14 +85,12 @@ def test_clone_fixture_meta_marks_age(clone_actionset: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _collect_seen_type_ints(reg_venv_available: bool) -> tuple[set[int], dict[int, list[str]]]:
+def _collect_seen_type_ints() -> tuple[set[int], dict[int, list[str]]]:
     """Walk every committed .reg, return (seen_type_ints, cameras_per_int).
 
     `cameras_per_int` is for diagnostics — when a code is missing from the
     union, it's useful to know which cameras DO have it (or that none do).
     """
-    if not reg_venv_available:
-        pytest.skip(".reg-venv not present")
     seen: set[int] = set()
     per_int: dict[int, list[str]] = {}
     for short in list_reg_cameras():
@@ -120,7 +116,7 @@ def _collect_seen_type_ints(reg_venv_available: bool) -> tuple[set[int], dict[in
     return seen, per_int
 
 
-def test_production_hives_cover_every_mapped_action_type(reg_venv_available: bool) -> None:
+def test_production_hives_cover_every_mapped_action_type() -> None:
     """Every type code in `_ACTION_TYPE` must appear in at least one committed hive.
 
     This is the real coverage test: it doesn't care what one synthetic
@@ -134,7 +130,7 @@ def test_production_hives_cover_every_mapped_action_type(reg_venv_available: boo
         decoder gets real coverage.
     """
     expected = set(_ACTION_TYPE.keys())
-    seen, per_int = _collect_seen_type_ints(reg_venv_available)
+    seen, per_int = _collect_seen_type_ints()
     missing = expected - seen
     extra_in_hives = seen - expected  # type ints present in hives but unmapped
     assert not missing, (
@@ -151,15 +147,13 @@ def test_production_hives_cover_every_mapped_action_type(reg_venv_available: boo
     )
 
 
-def test_production_hives_decode_with_no_unknown_types(reg_venv_available: bool) -> None:
+def test_production_hives_decode_with_no_unknown_types() -> None:
     """Across every committed .reg, no action row should decode to 'unknown'.
 
     Catches the case where a hive contains a type code _ACTION_TYPE doesn't
     map. Overlaps with the union test above but reports differently — this
     one fires per-row, useful when only one camera is affected.
     """
-    if not reg_venv_available:
-        pytest.skip(".reg-venv not present")
     offenders: list[tuple[str, int, int | None]] = []  # (camera, row_idx, raw_type)
     for short in list_reg_cameras():
         try:
@@ -185,9 +179,7 @@ def test_production_hives_decode_with_no_unknown_types(reg_venv_available: bool)
 # ---------------------------------------------------------------------------
 
 
-def test_trig_source_raw_preserves_bit7_decoded_list_excludes_it(
-    reg_venv_available: bool,
-) -> None:
+def test_trig_source_raw_preserves_bit7_decoded_list_excludes_it() -> None:
     """trig_source contract across production hives:
 
     - `trig_source_raw` is the unmodified BI value (bit 7 still set if BI
@@ -202,9 +194,6 @@ def test_trig_source_raw_preserves_bit7_decoded_list_excludes_it(
     The test fails only if someone re-introduces a mask before raw
     assignment, or accidentally adds bit 7 to the decoded label map.
     """
-    if not reg_venv_available:
-        pytest.skip(".reg-venv not present")
-
     valid_source_labels = {"motion", "onvif", "audio", "external", "dio", "group", "ai"}
     rows_with_trig_source = 0
     bit7_set_count = 0

@@ -3,10 +3,6 @@
 These tests confirm that every .reg export in `cam settings/` still parses
 without crashing — guards against future python-registry upgrades or
 parser tweaks that silently drop subtrees.
-
-Requires the .reg-venv sibling virtualenv (auto-detected by conftest.py).
-Skipped cleanly when unavailable so the suite stays runnable on CI hosts
-that don't have python-registry installed.
 """
 
 from __future__ import annotations
@@ -30,20 +26,15 @@ def test_at_least_one_reg_file_exists(cam_settings_dir: Path) -> None:
 
 
 @pytest.mark.parametrize("short", _camera_shorts(Path(__file__).resolve().parents[2].parent / "cam settings"))
-def test_each_reg_file_parses_without_error(
-    short: str,
-    reg_venv_available: bool,
-) -> None:
+def test_each_reg_file_parses_without_error(short: str) -> None:
     """Each .reg in cam settings/ parses to a non-empty dict."""
-    if not reg_venv_available:
-        pytest.skip(".reg-venv not present — install python-registry there to enable")
     parsed, age_days = parse_reg(short)
     assert isinstance(parsed, dict)
     assert parsed, f"{short}.reg parsed to an empty dict"
     assert age_days >= 0.0
 
 
-def test_reg_parser_returns_flat_backslash_joined_subkey_paths(reg_venv_available: bool) -> None:
+def test_reg_parser_returns_flat_backslash_joined_subkey_paths() -> None:
     """Per reg.py module docstring: keys are backslash-joined subkey paths
     relative to the hive root (the camera short *is* the root, so it's not
     prefixed onto child keys). Output is a single flat dict, not nested.
@@ -51,8 +42,6 @@ def test_reg_parser_returns_flat_backslash_joined_subkey_paths(reg_venv_availabl
     Pins down the contract: callers walk by string-prefix matching (e.g.
     ``Alerts\\OnTrigger\\``), not by nested dict traversal.
     """
-    if not reg_venv_available:
-        pytest.skip(".reg-venv not present")
     parsed, _ = parse_reg("SecCam_3")
     # No nested dicts — every value at top level is a dict-of-values, not a dict-of-subkeys.
     for k, v in parsed.items():

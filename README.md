@@ -201,22 +201,19 @@ settings the JSON API doesn't expose (trigger zone polygons, per-class AI
 confidence thresholds, per-preset alert-skip flags, ONVIF event handlers,
 alert action definitions). It expects:
 
-- A `.reg-venv/` directory in the launch CWD with `python-registry` installed,
-  OR `BI_MCP_REG_VENV_PYTHON` pointing at any Python interpreter that has it.
-  The default probe is platform-aware: on POSIX it looks for
-  `.reg-venv/bin/python3`, on Windows for `.reg-venv\Scripts\python.exe`.
 - A `cam settings/` directory in the launch CWD with `<short>.reg` exports,
   OR `BI_MCP_REG_DIR` pointing at the directory.
 
-To create the venv:
-- POSIX: `python3 -m venv .reg-venv && .reg-venv/bin/pip install python-registry`
-- Windows: `python -m venv .reg-venv && .reg-venv\Scripts\pip install python-registry`
+Parsing is in-process — `python-registry` ships as a normal `bi-mcp`
+dependency, so `pip install bi-mcp` is sufficient. (Earlier versions
+required a sibling `.reg-venv/` virtualenv; the `BI_MCP_REG_VENV_PYTHON`
+env var is now a no-op and will be removed in v0.2.)
 
-Both defaults resolve relative to the current working directory at call time,
-not the install location — so they work correctly whether bi-mcp is run from
-an editable checkout, a wheel, or via `uvx`. Camera short names are validated
-(`[A-Za-z0-9_-]+`) before being composed into a path, so a malformed name
-can't escape the configured directory.
+The `BI_MCP_REG_DIR` default resolves relative to the current working
+directory at call time, not the install location — so it works correctly
+whether bi-mcp is run from an editable checkout, a wheel, or via `uvx`.
+Camera short names are validated (`[A-Za-z0-9_-]+`) before being composed
+into a path, so a malformed name can't escape the configured directory.
 
 Re-export a camera from BI any time you tune settings (right-click camera →
 Camera settings → Copy/import → Export). Files older than 7 days trigger a

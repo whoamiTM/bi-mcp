@@ -30,21 +30,14 @@ from bi_mcp.shapers import (
 )
 
 
-def _shaped(camera_short: str, reg_venv_available: bool) -> dict:
-    if not reg_venv_available:
-        pytest.skip(".reg-venv not present — install python-registry there to enable")
+def _shaped(camera_short: str) -> dict:
     parsed, age_days = parse_reg(camera_short)
     return shape_reg(parsed, camera_short=camera_short, mtime_age_days=age_days)
 
 
 # ---------------------------------------------------------------------------
-# Table-driven unit tests — no .reg-venv dependency, always run on CI.
-#
-# Codex adversarial review (2026-05-25) flagged that the original tests
-# skip when .reg-venv is missing, so the safety net evaporates on hosts
-# without python-registry. These tests exercise the classifier and the
-# annotator directly with synthetic dicts so the encoding rules stay
-# pinned regardless of fixture availability.
+# Table-driven unit tests exercise the classifier and annotator directly
+# with synthetic dicts; fixture-based tests below walk the real .reg hives.
 # ---------------------------------------------------------------------------
 
 
@@ -162,9 +155,9 @@ def test_shape_reg_does_not_mutate_input() -> None:
     assert parsed == snapshot
 
 
-def test_passthrough_marker_present_on_sync1_blank_camsync(reg_venv_available: bool) -> None:
+def test_passthrough_marker_present_on_sync1_blank_camsync() -> None:
     """A profile-N subkey with sync=1 and empty camsync gets `_synced_with: profile_1`."""
-    out = _shaped("clone_seccam_10_test", reg_venv_available)
+    out = _shaped("clone_seccam_10_test")
     data = out["data"]
     # clone_seccam_10_test has Alerts\2..7 all with sync=1, camsync=""
     for n in range(2, 8):
@@ -180,9 +173,9 @@ def test_passthrough_marker_present_on_sync1_blank_camsync(reg_venv_available: b
         )
 
 
-def test_passthrough_marker_absent_when_sync_zero(reg_venv_available: bool) -> None:
+def test_passthrough_marker_absent_when_sync_zero() -> None:
     """A profile-N subkey with sync=0 is NOT a passthrough — no marker."""
-    out = _shaped("clone_seccam_10", reg_venv_available)
+    out = _shaped("clone_seccam_10")
     data = out["data"]
     # clone_seccam_10 has Alerts\3 with sync=0, camsync='SecCam_1' (cross-camera, not passthrough)
     entry = data.get("Alerts\\3")
@@ -194,14 +187,14 @@ def test_passthrough_marker_absent_when_sync_zero(reg_venv_available: bool) -> N
     )
 
 
-def test_passthrough_marker_absent_when_camsync_nonblank(reg_venv_available: bool) -> None:
+def test_passthrough_marker_absent_when_camsync_nonblank() -> None:
     """sync=1 but camsync='<other_cam>' = cross-camera sync, not profile-1 passthrough.
 
     (None of our current fixtures exhibit this — sync=1 always pairs with
     blank camsync in clone_seccam_10 — so this test is forward-looking
     against the encoding rule. Add a fixture or skip cleanly if absent.)
     """
-    out = _shaped("clone_seccam_10", reg_venv_available)
+    out = _shaped("clone_seccam_10")
     data = out["data"]
     found_cross_camera = False
     for key, entry in data.items():
@@ -220,13 +213,13 @@ def test_passthrough_marker_absent_when_camsync_nonblank(reg_venv_available: boo
         pytest.skip("No cross-camera sync profile-N row in fixture — encoding rule untested for that case")
 
 
-def test_profile_1_never_annotated(reg_venv_available: bool) -> None:
+def test_profile_1_never_annotated() -> None:
     """Profile 1 is the source of sync, not a target — never gets the marker.
 
     Profile 1's `sync`/`camsync` pair means cross-camera sync (to a peer
     camera), which is a different mechanism. We only annotate N>=2.
     """
-    out = _shaped("clone_seccam_10_test", reg_venv_available)
+    out = _shaped("clone_seccam_10_test")
     data = out["data"]
     for page in _PROFILE_SYNC_PAGES:
         key = f"{page}\\1"
@@ -238,7 +231,7 @@ def test_profile_1_never_annotated(reg_venv_available: bool) -> None:
         )
 
 
-def test_motion_off_by_one_is_handled(reg_venv_available: bool) -> None:
+def test_motion_off_by_one_is_handled() -> None:
     """Motion uses off-by-one numbering: `Motion` = profile 1, `Motion\\1` = profile 2.
 
     Codex caught a bug where the original implementation blanket-skipped
@@ -246,7 +239,7 @@ def test_motion_off_by_one_is_handled(reg_venv_available: bool) -> None:
     annotated. Pin the per-page minimum-N rule via a fixture that exhibits
     sync=1,camsync="" on `Motion\\<N>` for N>=1.
     """
-    out = _shaped("clone_seccam_10_test", reg_venv_available)
+    out = _shaped("clone_seccam_10_test")
     data = out["data"]
     # In clone_seccam_10_test, Motion\2..6 all have sync=1, camsync=''.
     # These represent profiles 3..7 per BI's off-by-one numbering.
@@ -267,7 +260,7 @@ def test_motion_off_by_one_is_handled(reg_venv_available: bool) -> None:
     )
 
 
-def test_motion_no_number_key_never_annotated(reg_venv_available: bool) -> None:
+def test_motion_no_number_key_never_annotated() -> None:
     """`Motion` with no profile number IS profile 1 — must never be marked passthrough.
 
     The off-by-one fix opens `Motion\\1` for annotation, but the unnumbered
@@ -275,7 +268,7 @@ def test_motion_no_number_key_never_annotated(reg_venv_available: bool) -> None:
     remain unannotated even if it has a sync/camsync pair (which it does,
     for cross-camera sync).
     """
-    out = _shaped("clone_seccam_10_test", reg_venv_available)
+    out = _shaped("clone_seccam_10_test")
     motion = out["data"].get("Motion")
     if motion is None:
         pytest.skip("Fixture has no top-level Motion key — encoding rule untested")
@@ -284,13 +277,13 @@ def test_motion_no_number_key_never_annotated(reg_venv_available: bool) -> None:
     )
 
 
-def test_non_profile_pages_not_annotated(reg_venv_available: bool) -> None:
+def test_non_profile_pages_not_annotated() -> None:
     """Subkeys outside the per-profile pages never get the marker.
 
     E.g. `Alerts\\OnTrigger\\3` is action row 3, not profile 3. Its
     `sync`/`camsync` fields (if any) mean nothing in profile-sync terms.
     """
-    out = _shaped("clone_seccam_10_test", reg_venv_available)
+    out = _shaped("clone_seccam_10_test")
     data = out["data"]
     for key, entry in data.items():
         if not isinstance(entry, dict):

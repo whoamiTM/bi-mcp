@@ -1,15 +1,11 @@
-"""Blue Iris .reg camera-settings parser wrapper.
+"""Blue Iris .reg camera-settings parser.
 
 Camera settings exports from BI are *binary regf hives*, not text registry
-files. Parsing them requires the ``python-registry`` package, which lives in
-a sibling virtualenv at ``../.reg-venv/`` (relative to the bi-mcp repo's
-parent — i.e. the ``blueiris/`` project root).
+files. Parsing them uses the ``python-registry`` package, which ships as a
+normal ``bi-mcp`` dependency. The parser runs in-process — no sibling venv
+or subprocess fork.
 
-To avoid forcing ``python-registry`` into bi-mcp's own deps, we subprocess
-to that venv's Python interpreter and run a small inline script that dumps
-the hive as JSON, then parse the result back here.
-
-The script-output JSON shape is::
+The returned dict shape is::
 
     {
         "<subkey path>": {
@@ -20,34 +16,31 @@ The script-output JSON shape is::
     }
 
 Empty subkeys / value-less subkeys are dropped. Binary values
-(``REG_BINARY``) are hex-encoded.
+(``REG_BINARY``) are encoded as ``{"_type": "binary", "hex": ..., "len": ...}``.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
-import subprocess
 import time
+import warnings
+from binascii import hexlify
 from pathlib import Path
 from typing import Any
 
+from Registry import Registry, RegistryParse
+
 from .errors import BiBadRequest, BiError, BiNotFound
 
-# Default locations resolve at *call* time relative to the current working
+# BI_MCP_REG_DIR resolves at *call* time relative to the current working
 # directory, not at import time relative to the source file. This is because
 # bi-mcp can be installed as a wheel / via uvx, in which case __file__ lives
-# inside the venv's site-packages tree — not next to the user's .reg-venv/
-# and cam settings/ directories. Claude Code launches the server from the
-# project dir (e.g. .../blueiris/), so CWD is the right anchor.
+# inside the venv's site-packages tree — not next to the user's
+# cam settings/ directory. Claude Code launches the server from the project
+# dir (e.g. .../blueiris/), so CWD is the right anchor.
 #
-# Either env var overrides its default:
-#   BI_MCP_REG_VENV_PYTHON — absolute path to a Python with python-registry
-#   BI_MCP_REG_DIR         — absolute path to the directory of <short>.reg files
-#
-# The defaults (when neither override is set) are ./.reg-venv/bin/python3
-# and ./cam settings/ relative to the launch directory.
+# Default (when unset) is ./cam settings/ relative to the launch directory.
 
 STALE_THRESHOLD_DAYS = 7.0
 
@@ -56,91 +49,69 @@ STALE_THRESHOLD_DAYS = 7.0
 # would let a caller escape BI_MCP_REG_DIR.
 _CAMERA_SHORT_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
-
-_PARSE_SCRIPT = r"""
-import json, sys
-from binascii import hexlify
-from Registry import Registry, RegistryParse
+_DEPRECATED_VENV_ENV = "BI_MCP_REG_VENV_PYTHON"
+_deprecation_warned = False
 
 
-def serialize(v):
+def _warn_deprecated_venv_env() -> None:
+    """Emit a one-shot DeprecationWarning if the legacy env var is set."""
+    global _deprecation_warned
+    if _deprecation_warned:
+        return
+    if os.environ.get(_DEPRECATED_VENV_ENV):
+        warnings.warn(
+            f"{_DEPRECATED_VENV_ENV} is no longer used — `python-registry` is "
+            "now a normal bi-mcp dependency and the parser runs in-process. "
+            "Unset this variable; it will be removed in v0.2.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+    _deprecation_warned = True
+
+
+def _serialize(v: Any) -> Any:
     # python-registry returns mostly native types for ints / strings; binary
-    # values come back as bytes. Hex-encode bytes so the JSON is portable.
+    # values come back as bytes. Hex-encode bytes so the result is portable.
     if isinstance(v, bytes):
         return {"_type": "binary", "hex": hexlify(v).decode("ascii"), "len": len(v)}
     if isinstance(v, (list, tuple)):
-        return [serialize(x) for x in v]
+        return [_serialize(x) for x in v]
     return v
 
 
-def walk(key, prefix=""):
-    out = {}
+def _walk(key: Any, prefix: str = "") -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
     name = prefix or key.name()
-    vals = {}
+    vals: dict[str, Any] = {}
     for val in key.values():
         try:
-            vals[val.name()] = serialize(val.value())
+            vals[val.name()] = _serialize(val.value())
         except (UnicodeDecodeError, RegistryParse.RegistryStructureDoesNotExist):
             continue
     if vals:
         out[name] = vals
     for sub in key.subkeys():
         sub_path = f"{name}\\{sub.name()}" if name else sub.name()
-        out.update(walk(sub, sub_path))
+        out.update(_walk(sub, sub_path))
     return out
 
 
-def main():
-    path = sys.argv[1]
-    requested = sys.argv[2] if len(sys.argv) > 2 else ""
-    r = Registry.Registry(path)
-    root = r.root()
-    if requested:
-        try:
-            key = root.find_key(requested)
-        except Registry.RegistryKeyNotFoundException:
-            print(json.dumps({"_error": f"key '{requested}' not found"}))
-            return 1
-        out = walk(key, prefix=requested)
-    else:
-        out = {}
-        for sub in root.subkeys():
-            out.update(walk(sub, prefix=sub.name()))
-    print(json.dumps(out, default=str))
-    return 0
+def _parse_hive(path: Path, key_path: str | None) -> dict[str, dict[str, Any]]:
+    """Parse a regf hive file. Returns the flat-by-subkey-path dict.
 
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-"""
-
-
-def _reg_venv_python() -> Path:
-    """Resolve the .reg-venv Python interpreter.
-
-    Env override wins; otherwise probe both standard venv layouts under
-    ``./.reg-venv/`` relative to CWD: POSIX (``bin/python3``) and Windows
-    (``Scripts/python.exe``). Blue Iris runs primarily on Windows, so the
-    Windows layout has to work out of the box.
-
-    Returns the first candidate that exists, or the POSIX path as the
-    "best-guess" return so the caller's not-found error message points at
-    a reasonable default. ``parse_reg()`` checks existence before invoking.
+    Raises ``Registry.RegistryKeyNotFoundException`` if ``key_path`` is set
+    and doesn't exist in the hive. Other parser failures propagate as
+    whatever exception ``python-registry`` raises.
     """
-    override = os.environ.get("BI_MCP_REG_VENV_PYTHON")
-    if override:
-        return Path(override).expanduser()
-    base = Path.cwd() / ".reg-venv"
-    candidates = [
-        base / "bin" / "python3",       # POSIX
-        base / "bin" / "python",        # POSIX (some venvs only ship `python`)
-        base / "Scripts" / "python.exe",  # Windows
-        base / "Scripts" / "python3.exe",  # Windows (rare)
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
-    return candidates[0]
+    r = Registry.Registry(str(path))
+    root = r.root()
+    if key_path:
+        key = root.find_key(key_path)
+        return _walk(key, prefix=key_path)
+    out: dict[str, dict[str, Any]] = {}
+    for sub in root.subkeys():
+        out.update(_walk(sub, prefix=sub.name()))
+    return out
 
 
 def _reg_dir() -> Path:
@@ -206,62 +177,22 @@ def parse_reg(camera_short: str, key_path: str | None = None) -> tuple[dict[str,
 
     Returns ``(parsed_data, mtime_age_days)``. ``parsed_data`` is keyed by
     backslash-joined registry subpath relative to the hive root (which is
-    itself the camera short name); see module docstring for the JSON shape.
+    itself the camera short name); see module docstring for the shape.
 
-    Raises ``BiNotFound`` if the .reg file is missing, ``BiError`` if the
-    parser subprocess fails for any reason.
+    Raises ``BiNotFound`` if the .reg file is missing or ``key_path`` is
+    absent from the hive. ``BiError`` for any other parse failure — the
+    in-process parser surfaces python-registry exceptions directly, so the
+    catch-all here is the only crash-isolation boundary the MCP server has.
     """
+    _warn_deprecated_venv_env()
     reg_file = resolve_reg_file(camera_short)
     age = mtime_age_days(reg_file)
 
-    py = _reg_venv_python()
-    if not py.exists():
-        raise BiError(
-            f"Cannot find the .reg-venv Python at {py}. Either (a) create the venv "
-            "in the launch directory: `python -m venv .reg-venv` then "
-            "`.reg-venv/bin/pip install python-registry` (POSIX) or "
-            "`.reg-venv\\Scripts\\pip install python-registry` (Windows); or "
-            "(b) set BI_MCP_REG_VENV_PYTHON to the absolute path of an existing "
-            "Python interpreter with python-registry installed."
-        )
-
-    cmd: list[str] = [str(py), "-c", _PARSE_SCRIPT, str(reg_file)]
-    if key_path:
-        cmd.append(key_path)
-
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30.0,
-        )
-    except FileNotFoundError as e:
-        raise BiError(f"Failed to invoke .reg-venv Python: {e}") from e
-    except subprocess.TimeoutExpired as e:
-        raise BiError(f".reg parser timed out after 30s on {reg_file}") from e
-
-    # Try to parse stdout first — the helper script signals "key not found" via
-    # an `{"_error": ...}` JSON payload on stdout with rc=1. We need to surface
-    # that as BiNotFound *before* raising the generic rc-mismatch BiError, so
-    # callers get an actionable error for typoed/absent subkeys.
-    parsed: Any = None
-    stdout = proc.stdout.strip()
-    if stdout:
-        try:
-            parsed = json.loads(stdout)
-        except json.JSONDecodeError:
-            parsed = None
-
-    if isinstance(parsed, dict) and "_error" in parsed:
-        raise BiNotFound(parsed["_error"])
-
-    if proc.returncode != 0:
-        stderr = proc.stderr.strip() or "(no stderr)"
-        raise BiError(f".reg parser failed (rc={proc.returncode}): {stderr}")
-
-    if parsed is None:
-        raise BiError(f".reg parser output was not JSON: {proc.stdout[:200]}")
+        parsed = _parse_hive(reg_file, key_path)
+    except Registry.RegistryKeyNotFoundException as e:
+        raise BiNotFound(f"key {key_path!r} not found in {reg_file.name}") from e
+    except Exception as e:
+        raise BiError(f"failed to parse {reg_file}: {e}") from e
 
     return parsed, age
