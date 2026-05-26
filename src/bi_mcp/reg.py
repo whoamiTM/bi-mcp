@@ -52,6 +52,14 @@ _CAMERA_SHORT_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 _DEPRECATED_VENV_ENV = "BI_MCP_REG_VENV_PYTHON"
 _deprecation_warned = False
 
+# In-process parser bounds. A normal BI camera hive is ~4 levels deep and
+# ~100-200 top-level keys, so these are generous ceilings that only trip
+# on pathological input (corrupted hive, future BI schema explosion, or
+# a deliberately-crafted file). On trip we raise BiError rather than spin
+# the MCP server's tool thread for an unbounded time.
+_MAX_HIVE_DEPTH = 50
+_MAX_HIVE_KEYS = 100_000
+
 
 def _warn_deprecated_venv_env() -> None:
     """Emit a one-shot DeprecationWarning if the legacy env var is set."""
@@ -79,7 +87,25 @@ def _serialize(v: Any) -> Any:
     return v
 
 
-def _walk(key: Any, prefix: str = "") -> dict[str, dict[str, Any]]:
+def _walk(
+    key: Any,
+    prefix: str = "",
+    depth: int = 0,
+    budget: dict[str, int] | None = None,
+) -> dict[str, dict[str, Any]]:
+    if budget is None:
+        budget = {"keys": 0}
+    if depth > _MAX_HIVE_DEPTH:
+        raise BiError(
+            f"hive nesting exceeds {_MAX_HIVE_DEPTH} levels at {prefix!r} — "
+            "refusing to recurse further (likely corrupted hive)"
+        )
+    budget["keys"] += 1
+    if budget["keys"] > _MAX_HIVE_KEYS:
+        raise BiError(
+            f"hive contains more than {_MAX_HIVE_KEYS} keys — "
+            "refusing to continue parsing (likely corrupted hive)"
+        )
     out: dict[str, dict[str, Any]] = {}
     name = prefix or key.name()
     vals: dict[str, Any] = {}
@@ -92,7 +118,7 @@ def _walk(key: Any, prefix: str = "") -> dict[str, dict[str, Any]]:
         out[name] = vals
     for sub in key.subkeys():
         sub_path = f"{name}\\{sub.name()}" if name else sub.name()
-        out.update(_walk(sub, sub_path))
+        out.update(_walk(sub, sub_path, depth + 1, budget))
     return out
 
 
@@ -108,9 +134,13 @@ def _parse_hive(path: Path, key_path: str | None) -> dict[str, dict[str, Any]]:
     if key_path:
         key = root.find_key(key_path)
         return _walk(key, prefix=key_path)
+    # Share one budget across every top-level subtree — otherwise a hive
+    # with many top-level subkeys could do N×_MAX_HIVE_KEYS work before
+    # the guard trips.
+    budget: dict[str, int] = {"keys": 0}
     out: dict[str, dict[str, Any]] = {}
     for sub in root.subkeys():
-        out.update(_walk(sub, prefix=sub.name()))
+        out.update(_walk(sub, prefix=sub.name(), budget=budget))
     return out
 
 
