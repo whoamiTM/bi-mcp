@@ -775,6 +775,39 @@ def _annotate_profile_sync_passthroughs(parsed: dict[str, Any]) -> dict[str, Any
     return out
 
 
+def _annotate_retriggers_label(parsed: dict[str, Any]) -> dict[str, Any]:
+    """Return a new outer dict where any ``Alerts\\<N>`` block with an
+    int ``retriggers`` field is shallow-copied with ``retriggers_label``
+    added next to the raw value. Unknown ints get ``"unknown_<n>"`` so
+    the field is always present when ``retriggers`` is. Non-matching
+    entries are reused by reference; the input is not mutated.
+
+    Encoding (empirically confirmed 2026-05-26 by flipping each UI value
+    on SecCam_1):
+
+      0 = "New triggers only"
+      1 = "New and all retriggers"
+      2 = "New zones/sources only (additive)"
+      3 = "New zones/sources only (exclusive)"
+    """
+    out: dict[str, Any] = {}
+    for key, val in parsed.items():
+        if (
+            isinstance(val, dict)
+            and key.startswith("Alerts\\")
+            and "\\OnTrigger" not in key
+            and "\\OnReset" not in key
+            and isinstance(val.get("retriggers"), int)
+        ):
+            ri = val["retriggers"]
+            copy = dict(val)
+            copy["retriggers_label"] = _RETRIGGERS.get(ri, f"unknown_{ri}")
+            out[key] = copy
+        else:
+            out[key] = val
+    return out
+
+
 def shape_reg(
     parsed: dict[str, Any],
     camera_short: str,
@@ -801,6 +834,7 @@ def shape_reg(
     bytes back; ``raw=true`` at the tool layer also bypasses this.
     """
     data = _annotate_profile_sync_passthroughs(parsed)
+    data = _annotate_retriggers_label(data)
     if not include_masks:
         data = _strip_maskbits_hex(data)
     return _drop_empty(
@@ -900,6 +934,17 @@ _TRIG_ALLZONES: dict[int, str] = {
     0: "exact",  # "=" in BI UI
     1: "all",
     2: "any",
+}
+
+# retriggers enum — Alert tab "When this camera is re-triggered" dropdown.
+# Lives at Alerts\<N>.retriggers (per-profile alert config).
+# Source: empirical capture 2026-05-26 by flipping each UI value and diffing
+# SecCam_1 .reg exports.
+_RETRIGGERS: dict[int, str] = {
+    0: "new_triggers_only",
+    1: "new_and_all_retriggers",
+    2: "new_zones_or_sources_additive",
+    3: "new_zones_or_sources_exclusive",
 }
 
 # trig_source bitmask — which trigger sources fire this action.
