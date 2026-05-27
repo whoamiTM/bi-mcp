@@ -808,6 +808,34 @@ def _annotate_retriggers_label(parsed: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _annotate_smartzones_label(parsed: dict[str, Any]) -> dict[str, Any]:
+    """Annotate ``AI\\<N>`` subkeys: decode the ``smartzones`` int into a
+    ``smartzones_label`` list of zone letters using the same ``trig_zones``
+    bitmask encoding (bit 0 = A … bit 7 = H/Hotspot).
+
+    Identification: ``AI\\<N>`` rows produced by the audit consistently show
+    smartzones values of 127 (= 0b01111111, A-G) and 255 (= 0b11111111, A-H
+    including Hotspot) across the install — an exact bit-for-bit match with
+    the documented ``trig_zones`` bitmask. No UI capture required.
+
+    The input dict is not mutated; only matching entries get a shallow copy
+    with the label added.
+    """
+    out: dict[str, Any] = {}
+    for key, val in parsed.items():
+        if (
+            isinstance(val, dict)
+            and key.startswith("AI\\")
+            and isinstance(val.get("smartzones"), int)
+        ):
+            copy = dict(val)
+            copy["smartzones_label"] = _decode_bitmask(val["smartzones"], _ZONE_LABELS)
+            out[key] = copy
+        else:
+            out[key] = val
+    return out
+
+
 def shape_reg(
     parsed: dict[str, Any],
     camera_short: str,
@@ -835,6 +863,7 @@ def shape_reg(
     """
     data = _annotate_profile_sync_passthroughs(parsed)
     data = _annotate_retriggers_label(data)
+    data = _annotate_smartzones_label(data)
     if not include_masks:
         data = _strip_maskbits_hex(data)
     return _drop_empty(
