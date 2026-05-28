@@ -8,6 +8,7 @@ from .. import shapers
 from ..client import BiClients
 from ..errors import BiBadRequest
 from ..utils.logging import log_tool_usage
+from ..utils.time import parse_since
 from .registry import register_tool
 from .tools_status import COMMON_SCHEMA
 
@@ -26,9 +27,15 @@ def _tool_list_clips(client: BiClients, args: dict) -> Any:
     # `delete=true` deletes ALL items matched by the query — a destructive
     # mutation deliberately not forwarded. Same reasoning as
     # `bi_list_alerts` stripping `reset`.
-    for k in ("startdate", "enddate", "view", "search", "tiles"):
+    for k in ("view", "search", "tiles"):
         if k in args:
             payload[k] = args[k]
+    for k in ("startdate", "enddate"):
+        if k in args and args[k] is not None:
+            try:
+                payload[k] = parse_since(args[k], arg_name=k)
+            except ValueError as e:
+                raise BiBadRequest(str(e)) from e
     raw = client.call("cliplist", **payload)
     if args.get("raw"):
         return raw
@@ -44,7 +51,8 @@ def register() -> None:
             "memo. Complementary to bi_list_alerts (clips include continuous "
             "recordings; alerts are AI/motion events). Requires 'camera' short name "
             "(or 'Index' for all). Optional 'view' (filter; see schema for full enum), "
-            "'startdate'/'enddate' (unix epoch), 'search' (memo substring, server-side), "
+            "'startdate'/'enddate' accept unix epoch int, ISO-8601, or relative "
+            "shorthand ('-2h', '-1d'). 'search' (memo substring, server-side), "
             "'tiles' (true=one entry per day, useful for calendar views). 'limit' "
             "default 50. Crossover note: alert-side view values (e.g. 'alerts', "
             "'people', 'zonea') will return *alert* items in this response — they "
@@ -59,8 +67,18 @@ def register() -> None:
                     "type": "string",
                     "description": "Camera short name (required). Use 'Index' for all cameras.",
                 },
-                "startdate": {"type": "integer", "description": "Unix epoch start."},
-                "enddate": {"type": "integer", "description": "Unix epoch end."},
+                "startdate": {
+                    "description": (
+                        "Earliest clip. Int (UTC sec), ISO-8601, or relative "
+                        "shorthand like '-2h', '-1d'."
+                    ),
+                },
+                "enddate": {
+                    "description": (
+                        "Latest clip. Int (UTC sec), ISO-8601, or relative "
+                        "shorthand like '-2h', '-1d'."
+                    ),
+                },
                 "view": {
                     "type": "string",
                     "description": (

@@ -4,54 +4,15 @@ from __future__ import annotations
 
 import json
 import re
-import time
-from datetime import datetime, timezone
 from typing import Any
 
 from .. import shapers
 from ..client import BiClients
 from ..errors import BiAdminRequired
 from ..utils.logging import log_tool_usage
+from ..utils.time import parse_since
 from .registry import register_tool
 from .tools_status import COMMON_SCHEMA
-
-
-_REL_RE = re.compile(r"^-(\d+)([smhd])$")
-_REL_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-
-
-def _parse_since(value: Any) -> int:
-    """Parse `since` into a UTC epoch (seconds).
-
-    Accepts:
-      * int / numeric string — passed through as epoch seconds.
-      * Relative shorthand like ``-15m``, ``-2h``, ``-1d``.
-      * ISO-8601 string parseable by ``datetime.fromisoformat``.
-    """
-    if isinstance(value, (int, float)):
-        return int(value)
-    if not isinstance(value, str) or not value:
-        raise ValueError(
-            "since must be an int (UTC seconds), ISO-8601 string, "
-            "or relative shorthand like '-15m', '-2h', '-1d'"
-        )
-    s = value.strip()
-    if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
-        return int(s)
-    m = _REL_RE.match(s)
-    if m:
-        n, unit = int(m.group(1)), m.group(2)
-        return int(time.time()) - n * _REL_UNITS[unit]
-    try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except ValueError as e:
-        raise ValueError(
-            f"since={value!r} not parseable. Accepted: int epoch seconds, "
-            "ISO-8601 ('2026-05-23T14:00:00Z'), or relative ('-15m','-2h','-1d')."
-        ) from e
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return int(dt.timestamp())
 
 
 def _apply_filters(
@@ -90,7 +51,7 @@ def _tool_list_log(client: BiClients, args: dict) -> Any:
 
     payload: dict[str, Any] = {}
     if "since" in args and args["since"] is not None:
-        payload["aftertime"] = _parse_since(args["since"])
+        payload["aftertime"] = parse_since(args["since"])
 
     obj_match: str | None = args.get("camera") or args.get("obj")
 
@@ -162,6 +123,10 @@ def register() -> None:
         _tool_list_log,
         description=(
             "Recent Blue Iris system log entries with optional filters.\n\n"
+            "**Pick the right tool:** for reconstructing 'what fired when' on a "
+            "camera, start with `bi_list_alerts` — per-alert timestamps with no "
+            "dedup. This log is best for system events (profile changes, disk "
+            "ops, logins, errors) and *aggregate* activity counts.\n\n"
             "Filters:\n"
             "  since   — UTC epoch sec, ISO-8601, or '-15m'/'-2h'/'-1d' "
             "(server-side via aftertime)\n"
@@ -170,7 +135,8 @@ def register() -> None:
             "  obj     — exact match on entry.obj (escape hatch: 'App', "
             "'MQTT', 'DB', 'AI_Input', drive letters, usernames)\n"
             "  levels  — list of accepted level ints; empirical: 0=info, "
-            "1=warn, 2=error, 3=trigger/alert event, 4=status change, 10=user\n"
+            "1=warn, 2=error, 3=trigger/alert aggregate (deduped — use "
+            "`bi_list_alerts` for per-event), 4=status change, 10=user\n"
             "  match   — case-insensitive substring on entry.msg\n"
             "  regex   — Python regex on entry.msg (IGNORECASE); xor with match\n"
             "  limit   — applied AFTER filtering (default 100)\n\n"
@@ -212,7 +178,9 @@ def register() -> None:
                     "items": {"type": "integer"},
                     "description": (
                         "Keep entries whose level is in this list. Empirical: "
-                        "0=info, 1=warn, 2=error, 3=trigger/alert, 4=status, 10=user."
+                        "0=info, 1=warn, 2=error, 3=trigger/alert aggregate "
+                        "(deduped — use bi_list_alerts for per-event), "
+                        "4=status, 10=user."
                     ),
                 },
                 "match": {

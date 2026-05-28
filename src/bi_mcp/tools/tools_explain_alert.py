@@ -876,6 +876,8 @@ def register() -> None:
         "bi_explain_alert_chain",
         _tool_explain_alert_chain,
         description=(
+            "**Use after `bi_list_alerts`** to decode what actions fired on "
+            "a specific alert. Pass the alert's `path` from that response. "
             "Explain a specific alert's action chain. Given (camera, "
             "alert_path), returns the alert's facts (memo, profile/preset "
             "at trigger, zones), each action row with its decoded filters, "

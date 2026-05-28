@@ -8,6 +8,7 @@ from .. import shapers
 from ..client import BiClients
 from ..errors import BiBadRequest
 from ..utils.logging import log_tool_usage
+from ..utils.time import parse_since
 from .registry import register_tool
 from .tools_status import COMMON_SCHEMA
 
@@ -22,9 +23,15 @@ def _tool_list_alerts(client: BiClients, args: dict) -> Any:
     payload: dict[str, Any] = {}
     # `reset=true` clears BI's new-alert counters — a mutation, deliberately
     # not forwarded.
-    for k in ("camera", "startdate", "enddate", "view", "search"):
+    for k in ("camera", "view", "search"):
         if k in args:
             payload[k] = args[k]
+    for k in ("startdate", "enddate"):
+        if k in args and args[k] is not None:
+            try:
+                payload[k] = parse_since(args[k], arg_name=k)
+            except ValueError as e:
+                raise BiBadRequest(str(e)) from e
     raw = client.call("alertlist", **payload)
     if args.get("raw"):
         return raw
@@ -64,8 +71,13 @@ def register() -> None:
         description=(
             "Recent alerts with AI memo (object, confidence, license plate), zones "
             "triggered, and clip path. Requires 'camera' short name (or 'Index' for all). "
-            "Optional 'startdate'/'enddate' (unix epoch), 'view' (filter; see schema "
-            "for full enum), 'search' (memo substring). 'limit' default 50. "
+            "**First stop for 'what fired when' / reconstructing an alert chain** — "
+            "per-alert timestamps and memos, no dedup. Use this before bi_list_log "
+            "when investigating a specific event. "
+            "Optional 'startdate'/'enddate' accept unix epoch int, ISO-8601 "
+            "('2026-05-27T14:09:02Z'), or relative shorthand ('-2h', '-1d'). "
+            "'view' (filter; see schema for full enum), 'search' (memo substring). "
+            "'limit' default 50. "
             "Crossover note: if 'view' is set to 'flagged', BI may also return *clip* "
             "items here; those clips lack the 'zones' field and their 'msec' is the "
             "clip length, not alert length."
@@ -78,8 +90,18 @@ def register() -> None:
                     "type": "string",
                     "description": "Camera short name (required). Use 'Index' for all cameras.",
                 },
-                "startdate": {"type": "integer", "description": "Unix epoch start."},
-                "enddate": {"type": "integer", "description": "Unix epoch end."},
+                "startdate": {
+                    "description": (
+                        "Earliest alert. Int (UTC sec), ISO-8601, or relative "
+                        "shorthand like '-2h', '-1d'."
+                    ),
+                },
+                "enddate": {
+                    "description": (
+                        "Latest alert. Int (UTC sec), ISO-8601, or relative "
+                        "shorthand like '-2h', '-1d'."
+                    ),
+                },
                 "view": {
                     "type": "string",
                     "description": (
