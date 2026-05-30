@@ -71,11 +71,6 @@ Open a terminal. On Windows that's PowerShell from the Start menu, on
 macOS it's Terminal from Spotlight, on Linux it's whatever terminal you
 already use.
 
-> **Heads up:** the PyPI release is being prepared. Until it lands, use
-> the `git+` install command shown in the second block below. The
-> `pipx install bi-mcp` form will start working as soon as v0.2.0 is
-> on PyPI.
-
 Then run one of these:
 
 ```bash
@@ -89,10 +84,10 @@ uv tool install bi-mcp
 uvx bi-mcp-server check
 ```
 
-Until PyPI is live, install straight from the GitHub source:
+You can also install straight from the GitHub source if you want the
+latest unreleased changes:
 
 ```bash
-# Works today, no PyPI release required
 pipx install git+https://github.com/whoamiTM/bi-mcp
 # or with uv:
 uv tool install git+https://github.com/whoamiTM/bi-mcp
