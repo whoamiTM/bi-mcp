@@ -24,7 +24,6 @@ from __future__ import annotations
 import os
 import re
 import time
-import warnings
 from binascii import hexlify
 from pathlib import Path
 from typing import Any
@@ -49,9 +48,6 @@ STALE_THRESHOLD_DAYS = 7.0
 # would let a caller escape BI_MCP_REG_DIR.
 _CAMERA_SHORT_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
-_DEPRECATED_VENV_ENV = "BI_MCP_REG_VENV_PYTHON"
-_deprecation_warned = False
-
 # In-process parser bounds. A normal BI camera hive is ~4 levels deep and
 # ~100-200 top-level keys, so these are generous ceilings that only trip
 # on pathological input (corrupted hive, future BI schema explosion, or
@@ -60,21 +56,6 @@ _deprecation_warned = False
 _MAX_HIVE_DEPTH = 50
 _MAX_HIVE_KEYS = 100_000
 
-
-def _warn_deprecated_venv_env() -> None:
-    """Emit a one-shot DeprecationWarning if the legacy env var is set."""
-    global _deprecation_warned
-    if _deprecation_warned:
-        return
-    if os.environ.get(_DEPRECATED_VENV_ENV):
-        warnings.warn(
-            f"{_DEPRECATED_VENV_ENV} is no longer used — `python-registry` is "
-            "now a normal bi-mcp dependency and the parser runs in-process. "
-            "Unset this variable; it will be removed in v0.2.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-    _deprecation_warned = True
 
 
 def _serialize(v: Any) -> Any:
@@ -214,7 +195,6 @@ def parse_reg(camera_short: str, key_path: str | None = None) -> tuple[dict[str,
     in-process parser surfaces python-registry exceptions directly, so the
     catch-all here is the only crash-isolation boundary the MCP server has.
     """
-    _warn_deprecated_venv_env()
     reg_file = resolve_reg_file(camera_short)
     age = mtime_age_days(reg_file)
 
