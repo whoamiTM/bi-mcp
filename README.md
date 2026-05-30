@@ -1,156 +1,274 @@
-# bi-mcp — Blue Iris MCP Server
+# bi-mcp: Blue Iris MCP Server
 
-A small Python [Model Context Protocol](https://modelcontextprotocol.io) server
-that lets Claude (or any MCP client) inspect — and optionally drive — a running
-Blue Iris NVR install in real time. You describe an issue; Claude calls the
-tools it needs (`bi_get_status`, `bi_get_camera_config`, `bi_list_alerts`,
-`bi_list_log`, `bi_get_reg`, …) and tells you what to change, citing the Blue
-Iris manual.
+Ask Claude about your security cameras in plain English. It looks at your
+live Blue Iris install and answers, instead of guessing. What cameras are
+online, why an alert fired, what the AI saw, how a preset is configured.
 
-**17 read-only tools** by default, plus **6 mutating tools**
-(`bi_trigger_camera`, `bi_set_ptz_preset`, `bi_set_profile`, `bi_export_clip`,
-`bi_update_record`, `bi_set_camera`) that register only when
-`BI_MCP_ALLOW_MUTATIONS=1`. MIT-licensed.
+## What is this?
 
-For agents (LLMs working through this server): read [AGENTS.md](AGENTS.md) —
-that's the canonical operating manual with tool routing, mutation safety
-rules, and the gap between what the BI JSON API exposes and what the `.reg`
-parser is for.
+[Blue Iris](https://blueirissoftware.com/) is a Windows NVR app for IP
+security cameras. It records footage, runs motion and AI detection, and
+manages PTZ cameras.
+
+The [Model Context Protocol](https://modelcontextprotocol.io) is a
+standard way for AI assistants like Claude to call tools on your own
+computer.
+
+bi-mcp is an MCP server that connects the two. Claude gets a set of
+read-only tools (and optional control tools) for inspecting your Blue
+Iris install. You talk to Claude, Claude talks to Blue Iris.
+
+Some example questions you can ask once it's set up:
+
+> What cameras are offline right now?
+>
+> Why did the front door camera fire an alert at 3:14 PM?
+>
+> Show me the trigger zones on SecCam_3.
+>
+> What's the current PTZ preset on the pan-tilt camera?
+
+17 read-only tools register by default. 6 control tools (rename a
+camera, switch profile, recall a PTZ preset, export a clip, and a couple
+more) register only when you explicitly opt in by setting
+`BI_MCP_ALLOW_MUTATIONS=1`. The project is MIT-licensed.
+
+> **Compatibility note:** bi-mcp is built and tested against Blue Iris
+> **5.x** (specifically 5.9.9.71). Blue Iris 6 is out but has not been
+> tested. Some tools call undocumented BI endpoints whose response shapes
+> may have changed in 6.x. If you run bi-mcp against Blue Iris 6 and
+> something works (or breaks), open an issue so I can update this note.
 
 ---
 
 ## Prerequisites
 
-- Blue Iris **5.x** with the **web server enabled** (Settings → Web server).
-- A dedicated **low-privilege Blue Iris user** for this server (see
-  [Security](#security)). Do **not** use your admin account.
-- Python **3.10+** on the machine that runs the MCP server. The server can run
-  on the Blue Iris box itself, on a separate machine on the LAN, or in WSL.
-- (Recommended) [`uv`](https://github.com/astral-sh/uv) for the one-line install.
+You need three things before installing.
+
+First, Blue Iris 5.x running on Windows with the web server enabled (see
+the compatibility note above about Blue Iris 6). In Blue Iris that's
+under Settings, then Web server, then check "Enabled".
+
+Second, Python 3.10 or newer on the machine that will run bi-mcp. To
+check what you have, open a terminal and run `python --version`. If it's
+missing or too old, install from
+[python.org](https://www.python.org/downloads/).
+
+Third, a Claude app. Either [Claude
+Desktop](https://claude.ai/download), which most users want, or [Claude
+Code](https://docs.claude.com/claude-code), which is the terminal CLI.
+
+bi-mcp itself can run on the Blue Iris box or on any other computer on
+the same LAN.
 
 ## Install
 
-### For users (recommended)
+bi-mcp is a command-line tool. The recommended way to install command-line
+Python tools is with `pipx`, which gives each tool its own isolated
+environment so they don't interfere with each other.
 
-If you have `uv`:
+Open a terminal. On Windows that's PowerShell from the Start menu, on
+macOS it's Terminal from Spotlight, on Linux it's whatever terminal you
+already use.
+
+> **Heads up:** the PyPI release is being prepared. Until it lands, use
+> the `git+` install command shown in the second block below. The
+> `pipx install bi-mcp` form will start working as soon as v0.2.0 is
+> on PyPI.
+
+Then run one of these:
 
 ```bash
+# Most common, works on macOS, Linux, and Windows
+pipx install bi-mcp
+
+# Faster alternative, if you have uv (https://docs.astral.sh/uv/)
+uv tool install bi-mcp
+
+# Try it once without installing anything permanent
+uvx bi-mcp-server check
+```
+
+Until PyPI is live, install straight from the GitHub source:
+
+```bash
+# Works today, no PyPI release required
+pipx install git+https://github.com/whoamiTM/bi-mcp
+# or with uv:
+uv tool install git+https://github.com/whoamiTM/bi-mcp
+# or one-shot:
 uvx --from git+https://github.com/whoamiTM/bi-mcp bi-mcp-server check
 ```
 
-That fetches, builds, and runs the server once. Repeated runs reuse the cache.
+If you don't have `pipx`, install it with `python -m pip install --user
+pipx` followed by `python -m pipx ensurepath`. Close and reopen your
+terminal so the new command lands on your `PATH`.
 
-### For developers / hackers
-
-```bash
-git clone https://github.com/whoamiTM/bi-mcp
-cd bi-mcp
-uv sync
-uv run bi-mcp-server check
-```
-
-Or with plain pip:
+After installing, confirm the command works:
 
 ```bash
-git clone https://github.com/whoamiTM/bi-mcp
-cd bi-mcp
-python -m venv .venv && source .venv/bin/activate  # or .venv\Scripts\activate on Windows
-pip install -e .
-bi-mcp-server check
+bi-mcp-server --help
 ```
 
-## Configure
+If you want to edit the source instead of installing a released version,
+see [For contributors](#for-contributors-editing-the-source) further down.
 
-Copy `.env.example` to `.env` and fill it in:
+## Create a Blue Iris user for bi-mcp
 
-```ini
-BI_HOST=192.168.1.10        # LAN IP or hostname of your Blue Iris box
-BI_PORT=81                  # Blue Iris web-server port
-BI_USER=mcp-readonly        # the dedicated user you created in BI
-BI_PASS=••••••••••          # that user's password
-BI_MCP_DEBUG=0              # 1 to log to stderr + a rotating cache file
+Don't point bi-mcp at your admin account. Create a dedicated low-privilege
+user that bi-mcp will log in as. In Blue Iris, go to Settings then Users
+and click the **+** button to add a user. Name it `mcp-readonly` (or
+whatever you prefer) and set a password you'll paste into the config in
+the next step. Set Access to "Local + LAN", leave Admin unchecked, and
+check the **PTZ** and **Clips** boxes. Under Camera groups, tick the
+groups you want Claude to be able to see.
+
+The [Security](#security) section further down has the full permission
+table and explains the optional admin user that a handful of tools need.
+
+## Quickstart with Claude Code
+
+The simplest way to register an MCP server with Claude Code is the
+`claude mcp add` command. From any terminal:
+
+```bash
+claude mcp add --transport stdio -s user \
+  -e BI_HOST=192.168.1.10 \
+  -e BI_PORT=81 \
+  -e BI_USER=mcp-readonly \
+  -e BI_PASS=your-password-here \
+  bi-mcp \
+  -- bi-mcp-server
 ```
 
-The server reads `.env` from the current working directory at startup. When
-launched by Claude Code, "current working directory" is whatever directory
-Claude Code is in — so either put `.env` there, or set the env vars in the
-MCP-config `env` block (see next section).
+Replace `192.168.1.10` with your Blue Iris box's LAN IP, and the user
+and password with the ones you just created. The `-s user` flag makes
+bi-mcp available in every project, not just the current directory.
 
-## Register with Claude Code
+Then restart Claude Code. Run `/exit` in any active session, then launch
+`claude` again. In a fresh session, ask:
 
-Edit `~/.claude.json` (or whatever your platform's Claude Code config file is)
-and add an entry under `mcpServers`:
+> List my Blue Iris cameras.
+
+Claude should call `bi_list_cameras` and show your camera list.
+
+### Editing the config file by hand
+
+If you'd rather edit the config directly, it lives at `~/.claude.json` on
+every platform. Add a `bi-mcp` entry under `mcpServers`:
 
 ```json
 {
   "mcpServers": {
     "bi-mcp": {
-      "command": "uvx",
-      "args": ["--from", "git+https://github.com/whoamiTM/bi-mcp", "bi-mcp-server"],
+      "command": "bi-mcp-server",
       "env": {
         "BI_HOST": "192.168.1.10",
         "BI_PORT": "81",
         "BI_USER": "mcp-readonly",
-        "BI_PASS": "••••••••••"
+        "BI_PASS": "your-password-here"
       }
     }
   }
 }
 ```
 
-Restart Claude Code. The `bi_*` tools should now appear in your tool list (17
-read tools by default, 23 if `BI_MCP_ALLOW_MUTATIONS=1`).
+Same restart procedure as above.
 
-## Verify it works
+## Quickstart with Claude Desktop
 
-Three smoke tests, in order of increasing involvement:
+I built bi-mcp against Claude Code and haven't tested it on Claude
+Desktop. The MCP protocol is the same so it should work the same, but
+the instructions below are lighter than the Claude Code path. PRs
+welcome if anything's off.
 
-1. **CLI connectivity check**
-   ```bash
-   bi-mcp-server check
-   ```
-   Expected: `OK — connected to Blue Iris 5.x.y.z at HOST:PORT, N cameras found`
+The friendliest way to edit the config is from inside Claude Desktop
+itself. Open the Claude menu, go to Settings, click the Developer tab,
+then click "Edit Config". Claude Desktop creates the file if it doesn't
+exist yet and opens it in your default editor.
 
-2. **CLI tool call**
-   ```bash
-   bi-mcp-server bi_list_cameras
-   bi-mcp-server bi_get_camera_config short=SecCam_3
-   ```
-   You should see shaped JSON for your cameras.
+If you'd rather find the file on disk, it lives at:
 
-3. **MCP Inspector**
-   ```bash
-   npx @modelcontextprotocol/inspector uvx --from . bi-mcp-server
-   ```
-   Opens a browser UI where you can poke each tool individually. Useful when
-   debugging schemas or response shapes.
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
-If steps 1–3 pass, the server is good. Connect Claude Code and ask it about
-your cameras.
+Add a `bi-mcp` entry under `mcpServers` using the same JSON shape as the
+Claude Code block above.
 
-## Breaking change: tool rename (v0.2.0)
+After saving, fully quit Claude Desktop and reopen it. Closing the
+window is not the same as quitting. Use the app menu's Quit option.
 
-The 10 read tools shipped in v0.1.0 were renamed to a consistent
-`bi_<verb>_<noun>` convention in v0.2.0. **No aliases are kept** — old
-callers will see `unknown tool` errors. Update any saved prompts, MCP
-client tool-name caches, or shell scripts accordingly:
+If you want a walkthrough that uses Claude Desktop with a different MCP
+server (the official filesystem one) as a template, Anthropic's user
+quickstart at
+[modelcontextprotocol.io/quickstart/user](https://modelcontextprotocol.io/quickstart/user)
+covers the same Settings → Developer → Edit Config flow in more detail.
 
-| Old name (v0.1.0)    | New name (v0.2.0)        |
-|----------------------|--------------------------|
-| `bi_status`          | `bi_get_status`          |
-| `bi_session_info`    | `bi_get_session`         |
-| `bi_cameras`         | `bi_list_cameras`        |
-| `bi_camera_config`   | `bi_get_camera_config`   |
-| `bi_log`             | `bi_list_log`            |
-| `bi_alerts`          | `bi_list_alerts`         |
-| `bi_alert_tracks`    | `bi_get_alert_tracks`    |
-| `bi_clip_info`       | `bi_get_clip_info`       |
-| `bi_timeline`        | `bi_get_timeline`        |
-| `bi_ptz_status`      | `bi_get_ptz_status`      |
+## When the first run doesn't work
 
-The rename is deliberate — naming consistency across the now-23-tool surface
-matters more than one-time backward compatibility for a pre-1.0 server. If
-that tradeoff doesn't work for your install, stay on v0.1.0.
+The most common cause is invalid JSON in the config file. Trailing
+commas, mismatched quotes, that kind of thing. Paste the file through a
+JSON validator if you're not sure.
+
+The next most common cause is not actually restarting the Claude app.
+For Claude Code, run `/exit` and then `claude` again. For Claude Desktop,
+use the app menu's Quit option. Closing the window isn't enough.
+
+If both of those check out, run the CLI smoke test from a terminal:
+
+```bash
+BI_HOST=192.168.1.10 BI_USER=mcp-readonly BI_PASS=... bi-mcp-server check
+```
+
+A passing run prints `OK — connected to Blue Iris 5.x.y.z at HOST:PORT,
+N cameras found`. If you see that, the server itself works and the
+problem is on the Claude side: config not loaded, wrong file, app not
+fully restarted. If the smoke test fails, jump to
+[Troubleshooting](#troubleshooting) further down.
+
+You can also call individual tools from the CLI to confirm they return
+real data:
+
+```bash
+bi-mcp-server bi_list_cameras
+bi-mcp-server bi_get_camera_config --short=SecCam_3
+```
+
+And for poking at tool schemas interactively, the MCP Inspector opens a
+browser UI:
+
+```bash
+npx @modelcontextprotocol/inspector uvx --from . bi-mcp-server
+```
+
+## Configuration reference
+
+bi-mcp reads its settings from environment variables. The `env` block in
+the Claude config above sets them, so you don't need a separate file.
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `BI_HOST` | yes | LAN IP or hostname of your Blue Iris box |
+| `BI_PORT` | yes | Blue Iris web-server port (default `81`) |
+| `BI_USER` | yes | The low-privilege user you created |
+| `BI_PASS` | yes | That user's password |
+| `BI_ADMIN_USER` | no | Optional admin user for admin-gated tools (see [Security](#security)) |
+| `BI_ADMIN_PASS` | no | Admin user's password |
+| `BI_MCP_ALLOW_MUTATIONS` | no | Set to `1` to enable the 6 control tools |
+| `BI_MCP_DEBUG` | no | Set to `1` to log to stderr and a rotating file |
+
+You can also put these in a `.env` file in the directory you launch the
+server from, which is handy for the CLI smoke tests. The `.env.example`
+file in this repo shows the format.
+
+### For contributors (editing the source)
+
+```bash
+git clone https://github.com/whoamiTM/bi-mcp
+cd bi-mcp
+uv sync                       # or: python -m venv .venv && source .venv/bin/activate && pip install -e .[dev]
+uv run bi-mcp-server check
+```
 
 ## Tool reference
 
@@ -168,7 +286,7 @@ mutation-safety rules, see [AGENTS.md](AGENTS.md).
 | `bi_get_sysconfig` | `sysconfig` | ✓ | | Archive/schedule/manrecsec + any DIO/MQTT inline. |
 | `bi_list_cameras` | `camlist` | | | All cameras and groups: online state, trigger counts, stream health. |
 | `bi_get_camera_config` | `camconfig`/`camlist` | (deep) | | Per-camera config (deep w/ admin, shallow w/o). |
-| `bi_get_camera_motion_config` | `camconfig` | ✓ | | Live `setmotion` + `setpost` subtrees — current sensitivity/contrast/breaktime/etc. without `.reg` staleness. AI thresholds NOT included. |
+| `bi_get_camera_motion_config` | `camconfig` | ✓ | | Live `setmotion` and `setpost` subtrees: current sensitivity, contrast, breaktime, and so on, without `.reg` staleness. AI thresholds not included. |
 | `bi_list_alerts` | `alertlist` | | | Recent alerts with AI memo, classification, zones, clip path. |
 | `bi_get_alert_tracks` | `tracks` | | | AI per-frame bounding boxes inside one alert. |
 | `bi_get_clip_info` | `clipstats` | | | Forensic detail for one clip. |
@@ -176,9 +294,9 @@ mutation-safety rules, see [AGENTS.md](AGENTS.md).
 | `bi_get_timeline` | `timeline` | | | 24-hour activity buckets for a camera. |
 | `bi_get_ptz_status` | `ptz` (query) | | | Current PTZ position, preset list, lock state. |
 | `bi_list_log` | `log` | ✓ | | Recent BI system log entries. |
-| `bi_get_reg` | (file parser) | | | Parse `.reg` camera export — trigger zones, AI thresholds, per-preset flags. |
+| `bi_get_reg` | (file parser) | | | Parse `.reg` camera export: trigger zones, AI thresholds, per-preset flags. |
 | `bi_get_actionset` | (file parser) | | | Decoded semantic view of `Alerts\OnTrigger` / `OnReset` action rows. |
-| `bi_audit_actions` | (file parser) | | | Cross-camera cohort-divergence report — surfaces action-row outliers (values that differ from the cohort majority) for user review. Outliers may be intentional per-camera customizations, not bugs. |
+| `bi_audit_actions` | (file parser) | | | Cross-camera cohort-divergence report. Surfaces action-row outliers (values that differ from the cohort majority) for user review. Outliers may be intentional per-camera customizations, not bugs. |
 | `bi_explain_alert_chain` | `clipstats` + `log` + (file) | ✓ | | Diagnose one alert: alert facts, per-row filter decode, comparator verdicts for compound/threshold/wait/cross-zone cases, and a ±2-minute log cross-reference of what BI actually did. Refuses alerts older than 24h by default (override with `max_alert_age_h`). |
 | `bi_trigger_camera` | `trigger` | ✓ | ✓ | Fire a synthetic motion trigger (mutations flag). |
 | `bi_set_ptz_preset` | `ptz` (cmd) | | ✓ | Recall a PTZ preset 1-20 (mutations flag). |
@@ -190,8 +308,8 @@ mutation-safety rules, see [AGENTS.md](AGENTS.md).
 ### Enabling mutating tools
 
 Set `BI_MCP_ALLOW_MUTATIONS=1` in `.env` (or in the MCP config `env` block).
-With the flag off, the mutating tools are not registered at all — the MCP
-tool list stays clean. Read [AGENTS.md § Mutation patterns](AGENTS.md) before
+With the flag off, the mutating tools are not registered at all, so the
+MCP tool list stays clean. Read [AGENTS.md § Mutation patterns](AGENTS.md) before
 flipping the flag.
 
 ### `bi_get_reg` and the `.reg` parser
@@ -204,13 +322,11 @@ alert action definitions). It expects:
 - A `cam settings/` directory in the launch CWD with `<short>.reg` exports,
   OR `BI_MCP_REG_DIR` pointing at the directory.
 
-Parsing is in-process — `python-registry` ships as a normal `bi-mcp`
-dependency, so `pip install bi-mcp` is sufficient. (Earlier versions
-required a sibling `.reg-venv/` virtualenv; the `BI_MCP_REG_VENV_PYTHON`
-env var is now a no-op and will be removed in v0.2.)
+Parsing is in-process. `python-registry` ships as a normal `bi-mcp`
+dependency, so the install is single-step.
 
 The `BI_MCP_REG_DIR` default resolves relative to the current working
-directory at call time, not the install location — so it works correctly
+directory at call time, not the install location, so it works correctly
 whether bi-mcp is run from an editable checkout, a wheel, or via `uvx`.
 Camera short names are validated (`[A-Za-z0-9_-]+`) before being composed
 into a path, so a malformed name can't escape the configured directory.
@@ -221,22 +337,22 @@ staleness warning in the tool's response.
 
 ## Troubleshooting
 
-**`unreachable`** — Cannot reach Blue Iris.
+**`unreachable`**: cannot reach Blue Iris.
 - Check `BI_HOST` and `BI_PORT` in `.env` (default port is 81).
 - Confirm Blue Iris's web server is enabled: BI → Settings → Web server.
-- From the same machine, try `curl -X POST -d '{"cmd":"login"}' http://HOST:PORT/json` — you should get a JSON response.
+- From the same machine, try `curl -X POST -d '{"cmd":"login"}' http://HOST:PORT/json`. You should get a JSON response.
 
-**`auth`** — Blue Iris rejected the login.
+**`auth`**: Blue Iris rejected the login.
 - Check `BI_USER` and `BI_PASS`.
 - The user must have LAN access enabled in BI → Settings → Users.
-- **Don't keep retrying with wrong creds** — Blue Iris will lock the account.
+- Don't keep retrying with wrong credentials. Blue Iris will lock the account.
 
-**`not_found`** — Requested camera/clip/alert doesn't exist.
-- For `bi_get_camera_config short=…`: the value must match a camera's *short name*, not its display name. Run `bi_list_cameras` to see the list.
+**`not_found`**: requested camera, clip, or alert doesn't exist.
+- For `bi_get_camera_config short=…`, the value must match a camera's *short name*, not its display name. Run `bi_list_cameras` to see the list.
 
-**Empty / weird responses** — pass `raw=true` to see what BI actually returned, then file an issue with the raw JSON so the shaper can be improved.
+**Empty or weird responses**: pass `raw=true` to see what BI actually returned, then file an issue with the raw JSON so the shaper can be improved.
 
-**Debug logging** — set `BI_MCP_DEBUG=1` in `.env` (or in the MCP config `env`).
+**Debug logging**: set `BI_MCP_DEBUG=1` in `.env` (or in the MCP config `env`).
 Logs go to stderr and a rotating file under your platform's user-cache dir:
 - Linux: `~/.cache/bi-mcp/server.log`
 - macOS: `~/Library/Caches/bi-mcp/server.log`
@@ -262,17 +378,18 @@ MCP client at a time. It should not be exposed to the internet.
 | Clip create | **checked** *only* if you enable `bi_export_clip` | Required by the BI `export` cmd. Leave unchecked otherwise. |
 | Camera groups | (tick all you want Claude to see) | |
 
-`.env` is gitignored. Never commit it. If you commit credentials by accident,
-delete the user in Blue Iris immediately and create a new one.
+If you work from a clone of this repo, `.env` is gitignored and you should
+never commit it. If credentials end up in a commit by accident, delete the
+Blue Iris user immediately and create a new one.
 
 ### Admin-gated tools and the two-user setup
 
 Blue Iris gates several JSON cmds behind admin, so the recommended pattern is
 a **two-user setup**:
 
-- `BI_USER` / `BI_PASS` — low-privilege account (PTZ + Clips), used for all
-  read tools that don't need admin.
-- `BI_ADMIN_USER` / `BI_ADMIN_PASS` — a dedicated admin account, used only
+- `BI_USER` and `BI_PASS`: the low-privilege account with PTZ and Clips access,
+  used for all read tools that don't need admin.
+- `BI_ADMIN_USER` and `BI_ADMIN_PASS`: a dedicated admin account, used only
   for the admin-gated cmds (marked ✓ in the *Admin?* column of the tool table
   above). Covers `bi_get_sysconfig`, `bi_list_log`, the deep path of
   `bi_get_camera_config`, `bi_get_camera_motion_config`, `bi_trigger_camera`,
@@ -285,7 +402,7 @@ admin-gated tools raise a clear `admin_required` error). See [AGENTS.md
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
 
 Contributions welcome. Open an issue on GitHub before sending a large PR so we
 can agree on shape.
