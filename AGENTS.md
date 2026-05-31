@@ -57,7 +57,7 @@ For static facts (camera → IP, role, friendly name), do **not** call
 | `bi_get_camera_config`  | `camconfig`/`camlist` | (deep needs admin) | | Per-camera config (deep w/ admin, shallow without)        |
 | `bi_get_camera_motion_config` | `camconfig` |   ✓    |           | Live motion + post-trigger settings (`setmotion` + `setpost`); read-only, no `.reg` staleness — AI thresholds NOT included |
 | `bi_list_alerts`        | `alertlist`  |        |           | Recent AI/motion alerts                                        |
-| `bi_get_alert_tracks`   | `tracks`     |        |           | Per-frame bounding boxes for one alert                         |
+| `bi_get_alert_tracks`   | `tracks`     |        |           | Per-frame bounding boxes for one alert. **BROKEN on 5.9.9.71** — returns `Access denied` from both read-user and admin-user paths; gating mechanism not yet characterized. Uses admin if configured, otherwise read client. |
 | `bi_get_clip_info`      | `clipstats`  |        |           | Forensic clip metadata                                         |
 | `bi_list_clips`         | `cliplist`   |        |           | Recorded clip inventory                                        |
 | `bi_get_timeline`       | `timeline`   |        |           | 24-hour activity timeline                                      |
@@ -87,11 +87,13 @@ shaper.
 ```
 bi_list_alerts(camera="SecCam_3", limit=20)
     → returns alerts[] with `path` (alert id) and `clip` (clip id)
-bi_get_alert_tracks(path=<alerts[i].path>)
-    → per-frame bounding boxes for one alert
 bi_get_clip_info(path=<alerts[i].clip>)
     → resolution, duration, AI/profile/schedule/zones active at trigger time
 ```
+
+`bi_get_alert_tracks(path=<alerts[i].path>)` would be the next step for
+per-frame bounding boxes, but is currently broken on BI 5.9.9.71
+(Access denied, gating undocumented — see tool-inventory note).
 
 `alerts[].offset` is **milliseconds into the parent clip**, not a Unix
 timestamp. Don't ISO-format it.

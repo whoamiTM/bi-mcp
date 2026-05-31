@@ -45,7 +45,10 @@ def _tool_get_alert_tracks(client: BiClients, args: dict) -> Any:
         raise BiBadRequest(
             "bi_get_alert_tracks requires a 'path' argument (the alert path/identifier)"
         )
-    raw = client.call("tracks", path=path)
+    if client.resolve_admin() is not None:
+        raw = client.admin_call("tracks", path=path)
+    else:
+        raw = client.call("tracks", path=path)
     if args.get("raw"):
         return raw
     return shapers.shape_alert_tracks(raw)
@@ -128,7 +131,13 @@ def register() -> None:
         _tool_get_alert_tracks,
         description=(
             "AI object tracks (per-frame bounding boxes) inside one alert. Pass the "
-            "alert's 'path' from bi_list_alerts."
+            "alert's 'path' from bi_list_alerts. "
+            "**KNOWN BROKEN on BI 5.9.9.71**: returns 'Access denied' from both the "
+            "read-user and admin-user paths. The `tracks` cmd appears in BI's JSON "
+            "cmd list but the manual provides no spec for it, and its gating "
+            "mechanism is undocumented. Uses admin if configured (in case a future "
+            "build accepts it), otherwise uses the read client. Do not rely on "
+            "this tool until the gating is characterized."
         ),
         schema={
             "type": "object",
