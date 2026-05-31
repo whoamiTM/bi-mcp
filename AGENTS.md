@@ -56,6 +56,7 @@ For static facts (camera → IP, role, friendly name), do **not** call
 | `bi_list_cameras`       | `camlist`    |        |           | All cameras + groups                                           |
 | `bi_get_camera_config`  | `camconfig`/`camlist` | (deep needs admin) | | Per-camera config (deep w/ admin, shallow without)        |
 | `bi_get_camera_motion_config` | `camconfig` |   ✓    |           | Live motion + post-trigger settings (`setmotion` + `setpost`); read-only, no `.reg` staleness — AI thresholds NOT included |
+| `bi_get_camera_snapshot` | `GET /image/<short>` |        |           | Current JPEG frame from a camera, returned as base64. For live coverage cross-reference + PTZ preset framing checks. |
 | `bi_list_alerts`        | `alertlist`  |        |           | Recent AI/motion alerts                                        |
 | `bi_get_alert_tracks`   | `tracks`     |        |           | Per-frame bounding boxes for one alert. **BROKEN on 5.9.9.71** — returns `Access denied` from both read-user and admin-user paths; gating mechanism not yet characterized. Uses admin if configured, otherwise read client. |
 | `bi_get_clip_info`      | `clipstats`  |        |           | Forensic clip metadata                                         |

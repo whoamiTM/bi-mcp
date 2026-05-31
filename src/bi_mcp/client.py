@@ -150,6 +150,38 @@ class BiClient:
             return resp["data"]
         return resp
 
+    def get_bytes(self, path: str, **params: Any) -> tuple[bytes, str]:
+        """GET a non-/json endpoint (e.g. `/image/<short>`) with the session
+        token attached as a query param. Returns (body_bytes, content_type).
+
+        Re-logs in and retries once on 401/403 in case the session expired,
+        matching the auth-retry behavior of ``call()``.
+        """
+        if not self.session:
+            self.login()
+        body, ctype, status = self._get_raw(path, {**params, "session": self.session})
+        if status in (401, 403):
+            log.info("GET %s returned %d; re-login + retry", path, status)
+            self.session = None
+            self.login()
+            body, ctype, status = self._get_raw(path, {**params, "session": self.session})
+        if status == 404:
+            raise BiNotFound(f"Blue Iris HTTP 404 on {path}")
+        if status >= 400:
+            raise BiBadRequest(f"Blue Iris returned HTTP {status} on {path}: {body[:200]!r}")
+        return body, ctype
+
+    def _get_raw(self, path: str, params: dict[str, Any]) -> tuple[bytes, str, int]:
+        try:
+            r = self._http.get(path, params=params)
+        except httpx.ConnectError as e:
+            raise BiUnreachable(f"Cannot connect to Blue Iris at {self.host}:{self.port}: {e}") from e
+        except httpx.TimeoutException as e:
+            raise BiUnreachable(f"Blue Iris at {self.host}:{self.port} timed out: {e}") from e
+        except httpx.HTTPError as e:
+            raise BiUnreachable(f"HTTP error talking to Blue Iris: {e}") from e
+        return r.content, r.headers.get("content-type", ""), r.status_code
+
     def close(self) -> None:
         self._http.close()
 
@@ -402,6 +434,10 @@ class BiClients:
         """Delegate to the read-only client. Tools that need admin should
         call `.admin_call(...)` explicitly."""
         return self.read.call(cmd, **payload)
+
+    def get_bytes(self, path: str, **params: Any) -> tuple[bytes, str]:
+        """Delegate to the read-only client's GET helper."""
+        return self.read.get_bytes(path, **params)
 
     def call_raw(self, cmd: str, **payload: Any) -> dict[str, Any]:
         """Delegate to the read-only client's raw cmd path.
