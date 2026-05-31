@@ -282,6 +282,7 @@ mutation-safety rules, see [AGENTS.md](AGENTS.md).
 | `bi_list_cameras` | `camlist` | | | All cameras and groups: online state, trigger counts, stream health. |
 | `bi_get_camera_config` | `camconfig`/`camlist` | (deep) | | Per-camera config (deep w/ admin, shallow w/o). |
 | `bi_get_camera_motion_config` | `camconfig` | ✓ | | Live `setmotion` and `setpost` subtrees: current sensitivity, contrast, breaktime, and so on, without `.reg` staleness. AI thresholds not included. |
+| `bi_get_camera_snapshot` | `GET /image/<short>` | | | Current JPEG frame, returned as base64. Useful for live coverage cross-reference and PTZ preset framing checks. |
 | `bi_list_alerts` | `alertlist` | | | Recent alerts with AI memo, classification, zones, clip path. |
 | `bi_get_alert_tracks` | `tracks` | | | AI per-frame bounding boxes inside one alert. |
 | `bi_get_clip_info` | `clipstats` | | | Forensic detail for one clip. |
