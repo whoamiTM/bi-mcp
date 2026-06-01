@@ -1009,9 +1009,13 @@ def _decode_bit_dict(mask: int, bits: dict[int, str]) -> list[str]:
     return [bits[b] for b in sorted(bits) if mask & (1 << b)]
 
 
-# profiles: bits 0-6 = profiles 0-6. Profile 0 is BI's real "Inactive" profile.
-# Source: jaydeel ipcamtalk thread 85627 (2026-05-21).
-_PROFILE_LABELS = [str(n) for n in range(7)]
+# profiles: bits 0-7 = profiles 0-7. BI has 8 profiles total (manual line
+# 6031: "There are 8 profiles, 0-7"). Profile 0 is BI's "Inactive" profile;
+# profiles 1-7 are user-renameable. profiles=254 (0xfe) = bits 1-7 set =
+# "all real profiles" (excludes 0/Inactive). Earlier 7-entry table dropped
+# bit 7 silently, mis-reporting profile-7 enabled rows.
+# Source: jaydeel ipcamtalk thread 85627 (2026-05-21) + manual § Profiles.
+_PROFILE_LABELS = [str(n) for n in range(8)]
 
 # Legacy sentinel: profiles=46 (0x2E) means "no profiles selected".
 _PROFILES_NONE_SENTINEL = 46
