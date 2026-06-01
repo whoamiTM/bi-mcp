@@ -836,6 +836,192 @@ def _annotate_smartzones_label(parsed: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+_PTZ_SCHEDULE_SLOT_BYTES = 28
+# bytes 0-1 (little-endian uint16) encode the slot's docmd opcode — the
+# same numeric command BI uses for action-set "Do command" entries (see
+# reference_bi_reg_decoder_tables.md ``docmd`` ranges). For "go to preset"
+# slots the opcode is 2200 + preset_number (range 2201-2456 = preset
+# 1-256). For "set profile" slots the opcode is in a different range
+# (not fully mapped yet — observed 2210 for a UI-configured "profile 2
+# → preset 11" slot, which is actually a preset-10 opcode, suggesting
+# the slot is a plain "goto preset N" gated by profile-2 enablement
+# elsewhere in the slot rather than a distinct action type).
+#
+# Verified 2026-05-31:
+# - editing a "go to preset 3" slot to "go to preset 5" changed only
+#   byte 0 (0x9b -> 0x9d) — preset increments fit in low byte alone.
+# - a "go to preset 256" slot has bytes 0-1 = (0x98, 0x09) =
+#   little-endian 0x0998 = 2456 = ``cmd - 2200 = preset 256``. Byte 0
+#   alone (0x98) wrapped to 0; the high byte is what disambiguates.
+# - a "preset 10" slot has bytes 0-1 = (0xa2, 0x08) = LE 0x08a2 = 2210
+#   = preset 10. Same docmd encoding.
+_PTZ_SCHEDULE_OPCODE_OFFSET = 0
+_PTZ_SCHEDULE_OPCODE_BYTES = 2
+# docmd preset range: cmd - 2200 = preset_number 1-256.
+# Source: jaydeel ipcamtalk thread 85627, also in
+# reference_bi_reg_decoder_tables.md.
+_PTZ_SCHEDULE_PRESET_OPCODE_BASE = 2200
+_PTZ_SCHEDULE_PRESET_OPCODE_MIN = 2201
+_PTZ_SCHEDULE_PRESET_OPCODE_MAX = 2456
+
+# Time encoding (verified 2026-05-31 by editing one slot from "sunset
+# preset 256" to "absolute 3:00 PM preset 40"):
+# - byte 10 = time-reference-type flag (0x1e = absolute, 0x1f = sunrise/
+#   sunset-relative). Hypothesis based on single-bit diff.
+# - byte 12 = trigger hour (24-hour clock). Slot was edited from 21
+#   (sunset 9pm-ish, the computed absolute time) to 15 (3pm). Even
+#   sunrise/sunset-relative slots appear to store the resolved
+#   absolute trigger time here.
+# - byte 14 = trigger minute. Edited from 36 to 0.
+_PTZ_SCHEDULE_TIME_TYPE_OFFSET = 10
+_PTZ_SCHEDULE_TIME_HOUR_OFFSET = 12
+_PTZ_SCHEDULE_TIME_MINUTE_OFFSET = 14
+_PTZ_SCHEDULE_TIME_TYPE_ABSOLUTE = 0x1E
+_PTZ_SCHEDULE_TIME_TYPE_RELATIVE = 0x1F
+# byte 21 = profile bitmask. Confirmed 2026-05-31 by single-byte .reg diff:
+# editing slot 0's profile from "all (1-7)" to "profile 1 only" changed
+# byte 21 from 0xfe (0b11111110 = bits 1-7) to 0x02 (0b00000010 = bit 1
+# only). No other byte changed. Same encoding as Alerts\<N>.profiles.
+_PTZ_SCHEDULE_PROFILE_BYTE_OFFSET = 21
+
+
+def _annotate_ptz_schedule_events(parsed: dict[str, Any]) -> dict[str, Any]:
+    """Annotate ``PTZ`` with a decoded ``events_slots`` list when the binary
+    ``events`` blob is present.
+
+    Schedule → Events list ("search-back at startup/reset") stores its slots
+    as a packed binary blob of fixed-size 28-byte entries. Empirically
+    observed fields:
+
+    - ``opcode`` (bytes 0-1 LE uint16) — the BI ``docmd`` opcode for the
+      slot's action. For preset moves, opcode = 2200 + preset_number
+      (range 2201-2456 = preset 1-256). Other opcodes (profile changes,
+      brightness, etc.) live in different ranges per
+      reference_bi_reg_decoder_tables.md ``docmd`` table.
+    - ``preset`` (decoded from opcode) — present only when the opcode
+      falls in the preset range 2201-2456. ``None`` otherwise; consumers
+      should fall through to ``opcode`` for non-preset actions.
+    - ``profile_mask`` (byte 21) — bitmask of profiles under which this
+      slot fires, same encoding as ``Alerts\\<N>.profiles``. Confirmed
+      2026-05-31 by single-byte .reg diff (0xfe -> 0x02 when slot edited
+      from "all profiles" to "profile 1 only").
+    - ``time_type`` (byte 10) — ``"absolute"`` (0x1e) vs
+      ``"sunrise_sunset_relative"`` (0x1f). The (hour, minute) bytes
+      store the resolved absolute trigger time in either case; the
+      type flag preserves "this came from sunrise/sunset" for UI display.
+    - ``time_hour`` / ``time_minute`` / ``time_hhmm`` (bytes 12, 14) —
+      24-hour clock trigger time. Verified 2026-05-31 by editing a slot
+      from sunset (21:36) to absolute 15:00.
+
+    The full 28-byte slot is returned verbatim as ``raw_slot_hex`` for
+    forensic re-diffing.
+
+    Primary diagnostic use: reconciling a PTZ swing that has no
+    corresponding BI log entry — the schedule slot is the silent mover.
+    See reference_bi_scheduled_events_search_back.
+    """
+    out: dict[str, Any] = {}
+    for key, val in parsed.items():
+        if key != "PTZ" or not isinstance(val, dict):
+            out[key] = val
+            continue
+        ev = val.get("events")
+        if not (isinstance(ev, dict) and ev.get("_type") == "binary"):
+            out[key] = val
+            continue
+        hex_str = ev.get("hex")
+        blob_len = ev.get("len")
+        if not isinstance(hex_str, str) or not isinstance(blob_len, int):
+            out[key] = val
+            continue
+        # Empty blob is the documented "no scheduled events" state — every
+        # spotter camera on this install ships with `len: 0, hex: ""`.
+        # Emit ``events_slots: []`` so callers can distinguish "explicitly
+        # zero slots configured" from "malformed blob, skipped" (no
+        # annotation) and from "camera has no events key at all" (also
+        # no annotation).
+        if blob_len == 0:
+            copy = dict(val)
+            copy["events_slots"] = []
+            out[key] = copy
+            continue
+        if blob_len % _PTZ_SCHEDULE_SLOT_BYTES != 0:
+            out[key] = val
+            continue
+        try:
+            raw = bytes.fromhex(hex_str)
+        except ValueError:
+            out[key] = val
+            continue
+        if len(raw) != blob_len:
+            out[key] = val
+            continue
+
+        slots: list[dict[str, Any]] = []
+        for idx in range(blob_len // _PTZ_SCHEDULE_SLOT_BYTES):
+            start = idx * _PTZ_SCHEDULE_SLOT_BYTES
+            chunk = raw[start : start + _PTZ_SCHEDULE_SLOT_BYTES]
+            opcode = int.from_bytes(
+                chunk[
+                    _PTZ_SCHEDULE_OPCODE_OFFSET : _PTZ_SCHEDULE_OPCODE_OFFSET
+                    + _PTZ_SCHEDULE_OPCODE_BYTES
+                ],
+                "little",
+            )
+            preset: int | None
+            if (
+                _PTZ_SCHEDULE_PRESET_OPCODE_MIN
+                <= opcode
+                <= _PTZ_SCHEDULE_PRESET_OPCODE_MAX
+            ):
+                preset = opcode - _PTZ_SCHEDULE_PRESET_OPCODE_BASE
+            else:
+                preset = None
+            profile_mask = chunk[_PTZ_SCHEDULE_PROFILE_BYTE_OFFSET]
+            if profile_mask == _PROFILES_NONE_SENTINEL:
+                profiles_decoded: list[str] = []
+            else:
+                profiles_decoded = _decode_bitmask(profile_mask, _PROFILE_LABELS)
+            time_type_byte = chunk[_PTZ_SCHEDULE_TIME_TYPE_OFFSET]
+            time_type: str | None
+            if time_type_byte == _PTZ_SCHEDULE_TIME_TYPE_ABSOLUTE:
+                time_type = "absolute"
+            elif time_type_byte == _PTZ_SCHEDULE_TIME_TYPE_RELATIVE:
+                time_type = "sunrise_sunset_relative"
+            else:
+                time_type = None
+            hour = chunk[_PTZ_SCHEDULE_TIME_HOUR_OFFSET]
+            minute = chunk[_PTZ_SCHEDULE_TIME_MINUTE_OFFSET]
+            # Sanity check the time bytes; if they're outside 0-23 / 0-59,
+            # the offsets are wrong for this slot (or the slot doesn't
+            # encode a clock time). Surface as None rather than a bad value.
+            time_hhmm: str | None
+            if 0 <= hour < 24 and 0 <= minute < 60:
+                time_hhmm = f"{hour:02d}:{minute:02d}"
+            else:
+                time_hhmm = None
+            slots.append(
+                {
+                    "slot_index": idx,
+                    "opcode": opcode,
+                    "preset": preset,
+                    "profile_mask": profile_mask,
+                    "profiles": profiles_decoded,
+                    "time_type_byte": time_type_byte,
+                    "time_type": time_type,
+                    "time_hour": hour,
+                    "time_minute": minute,
+                    "time_hhmm": time_hhmm,
+                    "raw_slot_hex": chunk.hex(),
+                }
+            )
+
+        copy = dict(val)
+        copy["events_slots"] = slots
+        out[key] = copy
+    return out
+
+
 def shape_reg(
     parsed: dict[str, Any],
     camera_short: str,
@@ -864,6 +1050,7 @@ def shape_reg(
     data = _annotate_profile_sync_passthroughs(parsed)
     data = _annotate_retriggers_label(data)
     data = _annotate_smartzones_label(data)
+    data = _annotate_ptz_schedule_events(data)
     if not include_masks:
         data = _strip_maskbits_hex(data)
     return _drop_empty(
