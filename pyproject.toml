@@ -46,3 +46,23 @@ Issues = "https://github.com/whoamiTM/bi-mcp/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bi_mcp"]
+
+[tool.hatch.build.targets.sdist]
+# Ship only source, tests, and docs. Explicitly EXCLUDE the local decoder
+# workbench under scripts/ (and any stray .reg/.env): it is generated from a
+# real Blue Iris install and contains site-specific config values that must
+# never be published. (0.2.0 leaked scripts/reg_decoder_coverage.* this way.)
+include = [
+  "src/bi_mcp",
+  "tests",
+  "README.md",
+  "AGENTS.md",
+  "LICENSE",
+  "pyproject.toml",
+]
+exclude = [
+  "scripts",
+  "*.reg",
+  ".env",
+  ".env.example",
+]
