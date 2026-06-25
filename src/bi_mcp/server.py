@@ -17,11 +17,34 @@ from typing import Any
 from dotenv import load_dotenv
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import ImageContent, TextContent, Tool
 
 from .client import BiClients, from_env
 from .errors import BiError
 from .logging_setup import get_logger, setup_logging
+
+# Marker key a tool sets on its result dict to request an MCP image block.
+# Value: {"data": <base64 str>, "mimeType": <str>}. The dispatcher splits it
+# into an ImageContent block (rendered inline by clients like Claude Desktop)
+# plus a TextContent block carrying the remaining metadata fields.
+_MCP_IMAGE_KEY = "_mcp_image"
+
+
+def _result_to_content(result: Any) -> list[Any]:
+    """Convert a tool's return value into MCP content blocks.
+
+    Default: one JSON TextContent block. If the result is a dict carrying the
+    `_mcp_image` marker, emit an ImageContent block (so the image renders in
+    image-aware clients) followed by a TextContent block of the other fields.
+    """
+    if isinstance(result, dict) and _MCP_IMAGE_KEY in result:
+        img = result[_MCP_IMAGE_KEY]
+        meta = {k: v for k, v in result.items() if k != _MCP_IMAGE_KEY}
+        return [
+            ImageContent(type="image", data=img["data"], mimeType=img["mimeType"]),
+            TextContent(type="text", text=json.dumps(meta, indent=2, default=str)),
+        ]
+    return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
 
 async def _serve() -> None:
@@ -90,7 +113,9 @@ async def _serve() -> None:
         return tools_out
 
     @server.call_tool()
-    async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[TextContent]:
+    async def call_tool(
+        name: str, arguments: dict[str, Any] | None
+    ) -> list[TextContent | ImageContent]:
         nonlocal version_logged
         args = arguments or {}
         log.debug("MCP call tool=%s", name)
@@ -104,7 +129,7 @@ async def _serve() -> None:
                 # version once and never again for this process.
                 log.info("Connected to Blue Iris version=%s", client.bi_version)
                 version_logged = True
-            return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            return _result_to_content(result)
         except BiError as e:
             log.info("tool=%s failed: kind=%s msg=%s", name, e.kind, e)
             return [TextContent(type="text", text=json.dumps(e.to_dict()))]

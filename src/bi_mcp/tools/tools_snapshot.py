@@ -37,11 +37,16 @@ def _tool_get_camera_snapshot(client: BiClients, args: dict) -> Any:
             f"Invalid camera short name {short!r}: must match [A-Za-z0-9_-]+"
         )
     body, content_type = client.get_bytes(f"/image/{short}")
+    image_base64 = base64.b64encode(body).decode("ascii")
     return {
         "camera": short,
         "content_type": content_type,
         "size_bytes": len(body),
-        "image_base64": base64.b64encode(body).decode("ascii"),
+        "image_base64": image_base64,
+        # The server dispatcher splits this marker into an MCP image block so
+        # the frame renders inline in image-aware clients (e.g. Claude Desktop);
+        # the remaining fields above become the accompanying text block.
+        "_mcp_image": {"data": image_base64, "mimeType": content_type},
     }
 
 

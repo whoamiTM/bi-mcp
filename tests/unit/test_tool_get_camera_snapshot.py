@@ -40,6 +40,8 @@ def test_snapshot_returns_base64_encoded_body() -> None:
     assert out["content_type"] == "image/jpeg"
     assert out["size_bytes"] == len(raw)
     assert base64.b64decode(out["image_base64"]) == raw
+    # MCP image marker the dispatcher splits into an image block.
+    assert out["_mcp_image"] == {"data": out["image_base64"], "mimeType": "image/jpeg"}
     assert client.calls == [("/image/SecCam_3", {})]
 
 

@@ -14,7 +14,7 @@ here. Read this first when entering a fresh session.
 - **Tested against:** Blue Iris **5.9.9.71** (x64) on Windows 10.
 - **Mode:** stdio MCP server. Read-only by default; mutating tools register
   only when `BI_MCP_ALLOW_MUTATIONS=1`.
-- **Surface:** 15 read tools (always) + 6 mutating tools (when enabled).
+- **Surface:** 19 read tools (always) + 6 mutating tools (when enabled).
 
 ---
 
@@ -56,7 +56,8 @@ For static facts (camera → IP, role, friendly name), do **not** call
 | `bi_list_cameras`       | `camlist`    |        |           | All cameras + groups                                           |
 | `bi_get_camera_config`  | `camconfig`/`camlist` | (deep needs admin) | | Per-camera config (deep w/ admin, shallow without)        |
 | `bi_get_camera_motion_config` | `camconfig` |   ✓    |           | Live motion + post-trigger settings (`setmotion` + `setpost`); read-only, no `.reg` staleness — AI thresholds NOT included |
-| `bi_get_camera_snapshot` | `GET /image/<short>` |        |           | Current JPEG frame from a camera, returned as base64. For live coverage cross-reference + PTZ preset framing checks. |
+| `bi_get_camera_snapshot` | `GET /image/<short>` |        |           | Current JPEG frame from a camera, returned as an MCP image block (renders inline) + base64. For live coverage cross-reference + PTZ preset framing checks. |
+| `bi_get_alert_image`    | `alertlist` + `GET /alerts/@<record>` |        |           | STORED alert image (the saved frame), resolved by `camera` + optional `at` time → most-recent alert at/before it. Returns an MCP image block (renders inline) + a text block with record/time/memo + base64. `markup=true` ⇒ v=2 overlay. Use a specific camera, not `Index`. |
 | `bi_list_alerts`        | `alertlist`  |        |           | Recent AI/motion alerts                                        |
 | `bi_get_alert_tracks`   | `tracks`     |        |           | Per-frame bounding boxes for one alert. **BROKEN on 5.9.9.71** — returns `Access denied` from both read-user and admin-user paths; gating mechanism not yet characterized. Uses admin if configured, otherwise read client. |
 | `bi_get_clip_info`      | `clipstats`  |        |           | Forensic clip metadata                                         |

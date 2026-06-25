@@ -28,7 +28,7 @@ Some example questions you can ask once it's set up:
 >
 > What's the current PTZ preset on the pan-tilt camera?
 
-17 read-only tools register by default. 6 control tools (rename a
+19 read-only tools register by default. 6 control tools (rename a
 camera, switch profile, recall a PTZ preset, export a clip, and a couple
 more) register only when you explicitly opt in by setting
 `BI_MCP_ALLOW_MUTATIONS=1`. The project is MIT-licensed.
@@ -267,7 +267,7 @@ uv run bi-mcp-server check
 
 ## Tool reference
 
-17 read tools register by default. The 6 mutating tools register only when
+19 read tools register by default. The 6 mutating tools register only when
 `BI_MCP_ALLOW_MUTATIONS=1`. Pass `raw=true` on any tool to get the unshaped
 Blue Iris JSON.
 
@@ -282,7 +282,8 @@ mutation-safety rules, see [AGENTS.md](AGENTS.md).
 | `bi_list_cameras` | `camlist` | | | All cameras and groups: online state, trigger counts, stream health. |
 | `bi_get_camera_config` | `camconfig`/`camlist` | (deep) | | Per-camera config (deep w/ admin, shallow w/o). |
 | `bi_get_camera_motion_config` | `camconfig` | ✓ | | Live `setmotion` and `setpost` subtrees: current sensitivity, contrast, breaktime, and so on, without `.reg` staleness. AI thresholds not included. |
-| `bi_get_camera_snapshot` | `GET /image/<short>` | | | Current JPEG frame, returned as base64. Useful for live coverage cross-reference and PTZ preset framing checks. |
+| `bi_get_camera_snapshot` | `GET /image/<short>` | | | Current JPEG frame, returned as an MCP image block (renders inline in image-aware clients) plus base64. Useful for live coverage cross-reference and PTZ preset framing checks. |
+| `bi_get_alert_image` | `alertlist` + `GET /alerts/@<record>` | | | Stored alert image (the saved frame, not a live one), resolved by camera + optional `at` time to the most-recent alert at/before it. Returns an MCP image block (renders inline) plus a metadata text block (record/time/memo) and base64; `markup=true` for the v=2 AI overlay. |
 | `bi_list_alerts` | `alertlist` | | | Recent alerts with AI memo, classification, zones, clip path. |
 | `bi_get_alert_tracks` | `tracks` | | | AI per-frame bounding boxes inside one alert. |
 | `bi_get_clip_info` | `clipstats` | | | Forensic detail for one clip. |
