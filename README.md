@@ -288,7 +288,7 @@ mutation-safety rules, see [AGENTS.md](AGENTS.md).
 | `bi_get_alert_tracks` | `tracks` | | | AI per-frame bounding boxes inside one alert. |
 | `bi_get_clip_info` | `clipstats` | | | Forensic detail for one clip. |
 | `bi_list_clips` | `cliplist` | | | Recorded clip inventory; complementary to `bi_list_alerts`. |
-| `bi_get_timeline` | `timeline` | | | 24-hour activity buckets for a camera. |
+| `bi_get_timeline` | `timeline` | | | Activity timeline (alert/clip spans) for a camera over a window; defaults to the last 24h. |
 | `bi_get_ptz_status` | `ptz` (query) | | | Current PTZ position, preset list, lock state. |
 | `bi_list_log` | `log` | ✓ | | Recent BI system log entries. |
 | `bi_get_reg` | (file parser) | | | Parse `.reg` camera export: trigger zones, AI thresholds, per-preset flags. |

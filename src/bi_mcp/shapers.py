@@ -278,9 +278,12 @@ def shape_clip_info(raw: Any) -> dict[str, Any]:
 def shape_timeline(raw: Any) -> Any:
     """Shape the `timeline` response — 24h activity per camera.
 
-    The raw response is highly variable (per BI version). For v1 we drop empty
-    fields and convert recognised epochs; future versions can decode the bucket
-    array if it becomes a usability problem.
+    Per BI manual § JSON Interface, the cmd replies with a single object
+    ``{colors, alerts, clips}`` where alerts/clips are span arrays carrying no
+    timestamp fields (time is derived as ``utc = startdate + x*msecpp``). We
+    pass the dict through verbatim — notably *keeping* empty ``alerts``/``clips``
+    arrays so callers can distinguish "no activity" from "field absent", and
+    preserving any unknown future BI keys.
     """
     if isinstance(raw, list):
         return [
@@ -288,7 +291,7 @@ def shape_timeline(raw: Any) -> Any:
             for t in raw
         ]
     if isinstance(raw, dict):
-        return _drop_empty(_replace_ts(raw, ("utc", "from", "to")))
+        return dict(raw)
     return raw
 
 
