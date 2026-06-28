@@ -62,7 +62,7 @@ For static facts (camera → IP, role, friendly name), do **not** call
 | `bi_get_alert_tracks`   | `tracks`     |        |           | Per-frame bounding boxes for one alert. **BROKEN on 5.9.9.71** — returns `Access denied` from both read-user and admin-user paths; gating mechanism not yet characterized. Uses admin if configured, otherwise read client. |
 | `bi_get_clip_info`      | `clipstats`  |        |           | Forensic clip metadata                                         |
 | `bi_list_clips`         | `cliplist`   |        |           | Recorded clip inventory                                        |
-| `bi_get_timeline`       | `timeline`   |        |           | 24-hour activity timeline                                      |
+| `bi_get_timeline`       | `timeline`   |        |           | Activity timeline over a window (alert/clip spans); defaults to last 24h |
 | `bi_get_ptz_status`     | `ptz` (query)|        |           | PTZ state: raw `presets[]` + `presetnum` passthrough, plus derived `preset_map` {N→desc} and `active_preset` {num,description} |
 | `bi_list_log`           | `log`        |   ✓    |           | System log entries with filters (since/camera/obj/levels/match/regex). Returns {entries, scanned, matched, warning?} |
 | `bi_get_reg`            | (file)       |        |           | .reg hive parse — for what the API can't reach                 |
