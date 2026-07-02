@@ -468,8 +468,8 @@ The mapping to `ErrorCode`:
 | `BiError` kind       | `ErrorCode`           | When                                            | What to do                                            |
 | -------------------- | --------------------- | ----------------------------------------------- | ----------------------------------------------------- |
 | `unreachable`        | `BI_UNREACHABLE`      | BI host down / port wrong                       | Surface to user; check BI_HOST/BI_PORT                |
-| `auth`               | `AUTH_FAILED`         | Read-user login rejected                        | Surface; check BI_USER/BI_PASS                        |
-| `admin_auth`         | `ADMIN_AUTH_FAILED`   | Admin-user login rejected                       | Surface; check BI_ADMIN_USER/BI_ADMIN_PASS            |
+| `auth`               | `AUTH_FAILED`         | Read-user login rejected, or a cmd failed with an explicit auth-class reason even after re-login | Surface; check BI_USER/BI_PASS                        |
+| `admin_auth`         | `ADMIN_AUTH_FAILED`   | Same, on the admin client                       | Surface; check BI_ADMIN_USER/BI_ADMIN_PASS            |
 | `admin_required`     | `ADMIN_REQUIRED`      | Admin cmd called with no admin client           | Surface; tell user to set admin creds                 |
 | `not_found`          | `CAMERA_NOT_FOUND` etc| Camera/alert/clip doesn't exist                 | Don't retry — fix the input                           |
 | `bad_request`        | `VALIDATION_FAILED`   | Tool arg shape wrong                            | Don't retry — fix the call                            |
@@ -478,9 +478,11 @@ The mapping to `ErrorCode`:
 | `bi_error`           | `BI_ERROR`            | Anything else from BI                           | Surface verbatim; log for diagnosis                   |
 
 **Retry rules:** transient session-expiry is handled inside `BiClient.call`
-(one auto re-login + retry). Beyond that, the agent should NOT retry —
-all the typed errors above are durable failures that need a different
-input or a config fix.
+(one auto re-login + retry, taken only when the fail reason is auth-class
+or unclassifiable; non-auth failures like "Access denied" — per-cmd
+capability gating on a valid session — raise immediately without a retry).
+Beyond that, the agent should NOT retry — all the typed errors above are
+durable failures that need a different input or a config fix.
 
 ---
 

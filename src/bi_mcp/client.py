@@ -8,9 +8,12 @@ Implements the two-step MD5 session handshake documented in
      → server returns ``result:"success"`` + login data
 
 The session token is cached and reused for all subsequent calls. If a call
-returns ``result:"fail"`` mid-session, the client logs in once more and
-retries the call transparently. Auth failures (wrong user/pass) are NOT
-retried — Blue Iris has built-in brute-force lockout.
+returns an auth-class ``result:"fail"`` mid-session (expired/invalid session
+per ``_AUTH_FAIL_SUBSTRINGS``, or an unclassifiable reason), the client logs
+in once more and retries the call transparently; non-auth failures (bad
+camera name, per-cmd capability denial like "Access denied") raise
+immediately. Login failures (wrong user/pass) are NOT retried — Blue Iris
+has built-in brute-force lockout.
 """
 
 from __future__ import annotations
@@ -37,6 +40,60 @@ from .logging_setup import get_logger
 log = get_logger()
 
 DEFAULT_TIMEOUT = 10.0
+
+# BI reports ``result:"fail"`` for expired sessions AND legitimate cmd
+# failures alike; the ``data.reason`` text is the only discriminator.
+# Whitelist sourced from ha-blueiris (api/blue_iris_api.py:275-288), which
+# only re-authenticates when the reason matches one of these substrings.
+#
+# Deliberate deviation from ha-blueiris: "access denied" is EXCLUDED. On BI
+# 5.9.9.71 that reason means per-cmd capability gating on a fully valid
+# session (``tracks`` returns it even for admin; ``export`` returns it when
+# the user lacks clipcreate) — a re-login cannot fix it, and
+# ``bi_update_record``'s read→admin graduation depends on it surfacing as a
+# bare ``BiError`` (its guard is ``type(e) is BiError``).
+_AUTH_FAIL_SUBSTRINGS = (
+    "invalid session",
+    "unauthorized",
+    "authorization",
+    "not logged in",
+    "login",
+    "authentication",
+    "not authenticated",
+)
+
+
+def _fail_reason(resp: dict[str, Any]) -> str:
+    """Best-effort human-readable reason from a ``result:"fail"`` envelope."""
+    data = resp.get("data")
+    if isinstance(data, dict):
+        reason = data.get("reason")
+        if reason:
+            return str(reason)  # coerce — BI could send a non-string here
+        # Fall back to the whole dict repr when there's no "reason" key —
+        # whatever BI did include shouldn't vanish from the error message.
+        return str(data) if data else "no reason given"
+    return str(data) if data else "no reason given"
+
+
+def _classify_fail(resp: dict[str, Any]) -> bool | None:
+    """Classify a fail envelope: True = auth-class reason, False = non-auth
+    reason, None = unclassifiable (missing/malformed ``data.reason``).
+
+    The two call sites weigh None differently:
+    - retry decision: None retries (preserves the historical broad-retry
+      behavior for odd/old BI replies; strict tightening risks regressions)
+    - post-retry exception typing: None raises plain ``BiError`` — claiming
+      "auth failed, check credentials" needs an explicit auth-class reason.
+    """
+    data = resp.get("data")
+    if not isinstance(data, dict):
+        return None
+    reason = data.get("reason")
+    if not isinstance(reason, str) or not reason:
+        return None
+    lowered = reason.lower()
+    return any(s in lowered for s in _AUTH_FAIL_SUBSTRINGS)
 
 
 class BiClient:
@@ -73,6 +130,8 @@ class BiClient:
     def login(self) -> dict[str, Any]:
         """Perform the two-step MD5 handshake. Returns the login response ``data``."""
         log.debug("Login step 1: requesting session for user=%s", self.user)
+        # Deliberately _post, NOT _call_with_auth_retry: step 1's fail reply
+        # is the expected handshake response, not an auth failure to classify.
         step1 = self._post({"cmd": "login"})
 
         # Step 1 always returns result:"fail" + session. If it returns success
@@ -112,16 +171,33 @@ class BiClient:
             self.login()
         body: dict[str, Any] = {"cmd": cmd, "session": self.session, **payload}
         log.debug("Call (raw) cmd=%s", cmd)
+        return self._call_with_auth_retry(cmd, body)
+
+    def _call_with_auth_retry(self, cmd: str, body: dict[str, Any]) -> dict[str, Any]:
+        """POST a cmd body; on an auth-class fail, re-login and retry once.
+
+        Non-auth failures (bad camera name, cmd-specific permission denial,
+        ...) raise ``BiError`` immediately — a re-login round-trip cannot fix
+        them. A post-retry failure raises ``BiAuthFailed`` when the second
+        reason is still auth-class (so ``admin_call`` can re-tag it as
+        ``BiAdminAuthFailed``), plain ``BiError`` otherwise.
+        """
+        resp = self._post(body)
+        if resp.get("result") != "fail":
+            return resp
+        if _classify_fail(resp) is False:
+            log.debug("cmd=%s failed (non-auth): %s — not retrying", cmd, _fail_reason(resp))
+            raise BiError(f"Blue Iris cmd={cmd} failed: {_fail_reason(resp)}")
+        log.info("cmd=%s returned auth-class fail; attempting one session re-login + retry", cmd)
+        self.session = None
+        self.login()
+        body["session"] = self.session
         resp = self._post(body)
         if resp.get("result") == "fail":
-            log.info("cmd=%s returned fail; attempting one session re-login + retry", cmd)
-            self.session = None
-            self.login()
-            body["session"] = self.session
-            resp = self._post(body)
-            if resp.get("result") == "fail":
-                reason = (resp.get("data") or {}).get("reason") or resp.get("data") or "no reason given"
-                raise BiError(f"Blue Iris cmd={cmd} failed: {reason}")
+            reason = _fail_reason(resp)
+            if _classify_fail(resp) is True:
+                raise BiAuthFailed(f"Blue Iris cmd={cmd} failed after re-login: {reason}")
+            raise BiError(f"Blue Iris cmd={cmd} failed: {reason}")
         return resp
 
     def call(self, cmd: str, **payload: Any) -> Any:
@@ -131,19 +207,7 @@ class BiClient:
 
         body: dict[str, Any] = {"cmd": cmd, "session": self.session, **payload}
         log.debug("Call cmd=%s", cmd)
-        resp = self._post(body)
-
-        if resp.get("result") == "fail":
-            # Could be expired session OR legitimate cmd failure. Distinguish
-            # by retrying login + call once; if it still fails, surface it.
-            log.info("cmd=%s returned fail; attempting one session re-login + retry", cmd)
-            self.session = None
-            self.login()
-            body["session"] = self.session
-            resp = self._post(body)
-            if resp.get("result") == "fail":
-                reason = (resp.get("data") or {}).get("reason") or resp.get("data") or "no reason given"
-                raise BiError(f"Blue Iris cmd={cmd} failed: {reason}")
+        resp = self._call_with_auth_retry(cmd, body)
 
         # Most cmds return result:"success" + data. A few return data inline.
         if "data" in resp:
