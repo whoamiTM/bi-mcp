@@ -10,3 +10,7 @@ build/
 .ruff_cache/
 .mypy_cache/
 .audit/
+
+# Local-only test fixtures: real BI camera hives containing site config and
+# base64 camera credentials (ippw). Must never reach GitHub or the sdist.
+tests/fixtures/
