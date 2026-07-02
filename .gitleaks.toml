@@ -1,0 +1,27 @@
+# gitleaks custom ruleset for bi-mcp
+#
+# Extends the default gitleaks ruleset with project-specific patterns
+# the upstream scanner doesn't know about. Run `gitleaks dir .` before
+# every commit (the shared pre-commit hook + Claude Code PreToolUse hook
+# both invoke gitleaks against staged content).
+#
+# Created 2026-07-01 via the gitleaks-init skill.
+#
+# Why this rule exists (verified gap, not speculative):
+# Blue Iris .reg camera exports embed the camera admin password
+# base64-encoded in the `ippw` registry value. The binary hives themselves
+# are gitignored (tests/fixtures/) and UTF-16LE, which gitleaks cannot
+# scan — a 2026-07-01 audit missed the known credential. The realistic
+# text-form leak vector is a decoder dump or strings extraction pasted
+# into a tracked file (`ippw = d2hv...`), the same file class that leaked
+# to PyPI in v0.2.0 (scripts/reg_decoder_coverage.*).
+
+title = "bi-mcp extended ruleset"
+[extend]
+useDefault = true
+
+[[rules]]
+id = "bi-reg-ippw-base64"
+description = "Blue Iris camera password: ippw registry value with base64 payload in text form"
+regex = '''(?i)\bippw\b[^A-Za-z0-9+/\n]{1,16}[A-Za-z0-9+/]{8,}={0,2}'''
+keywords = ["ippw"]
