@@ -36,7 +36,14 @@ def test_image_marker_splits_into_image_plus_metadata_text() -> None:
     assert isinstance(img, ImageContent)
     assert img.type == "image"
     assert img.data == "QUJD"
-    assert img.mimeType == "image/jpeg"
+    # SDK 1.x exposes the attribute as `mimeType`, 2.x renamed it to
+    # `mime_type` (the camelCase wire alias is preserved either way, which
+    # is what `_result_to_content` constructs with). Resolve the attribute
+    # FIRST, then compare once — folding the fallback into the assert as
+    # `getattr(...) or x == y` binds as `(getattr(...)) or (x == y)`, which
+    # short-circuits on 2.x and never compares anything.
+    mime = getattr(img, "mime_type", None) or getattr(img, "mimeType", None)
+    assert mime == "image/jpeg"
 
     assert isinstance(text, TextContent)
     meta = json.loads(text.text)

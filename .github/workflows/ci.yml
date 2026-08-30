@@ -1,0 +1,109 @@
+# Run the suite once per MCP SDK generation.
+#
+# WHY: src/bi_mcp/server.py supports both SDK generations (1.x low-level
+# decorators, 2.x constructor kwargs). A venv holds one SDK at a time, so
+# locally half the compatibility surface is always dark. pyproject pins
+# `mcp>=2.1.1,<3`, so a fresh install gets 2.x and the 13 tests gated behind
+# `@_needs_1x_decorator` run NOWHERE — a regression in the retained 1.x branch
+# would leave the suite green and silent. This matrix keeps both legs lit.
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Both legs verified locally at these exact versions.
+          - sdk: "1.x"
+            mcp: "1.27.1"
+            expect_generation: "1x"
+            # The 13 @_needs_1x_decorator tests MUST execute here: they are
+            # the only ones driving the real 1.x decorator, and the sole
+            # reason this leg exists.
+            require_1x_gated: 13
+          - sdk: "2.x"
+            mcp: "2.1.1"
+            expect_generation: "2x"
+            # They correctly skip on 2.x. Asserting 0 pins that too, so a
+            # mis-provisioned 2.x leg silently running 1.x also goes red.
+            require_1x_gated: 0
+
+    name: py3.12 / mcp ${{ matrix.sdk }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The project declares requires-python >=3.10, but 3.12 is what the
+      # local venv runs and what this suite is soaked against. The SDK axis
+      # is the point of this workflow, so the Python axis stays fixed at one
+      # version rather than multiplying legs for no measured risk.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Dev deps are PEP 735 `[dependency-groups]`, NOT an extra:
+      # `pip install -e ".[dev]"` installs NOTHING and exits 0. The correct
+      # invocation is `pip install --group dev`, which needs pip >= 25.1.
+      - name: Upgrade pip (>=25.1 for --group)
+        run: python -m pip install --upgrade "pip>=25.1"
+
+      - name: Install package and dev group
+        run: |
+          python -m pip install -e .
+          python -m pip install --group dev
+
+      # The 1.x leg must FORCE its SDK over the declared `mcp>=2.1.1,<3`
+      # floor. pip performs the downgrade and exits 0, but prints a resolver
+      # conflict warning; that is expected here and the verify step below is
+      # what actually decides whether the right SDK is importable.
+      - name: Force MCP SDK ${{ matrix.mcp }}
+        run: python -m pip install "mcp==${{ matrix.mcp }}"
+
+      # INSTRUMENT VALIDITY. A leg that silently installed the wrong SDK
+      # would pass vacuously and be worse than no CI. Assert on what is
+      # actually IMPORTABLE (the project's own probe), not on what pip says.
+      - name: Verify the intended SDK is the one that loaded
+        env:
+          EXPECT_MCP: ${{ matrix.mcp }}
+          EXPECT_GEN: ${{ matrix.expect_generation }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          from importlib.metadata import version
+          from bi_mcp.server import _sdk_generation
+
+          want_ver, want_gen = os.environ["EXPECT_MCP"], os.environ["EXPECT_GEN"]
+          got_ver, got_gen = version("mcp"), _sdk_generation()
+          print(f"mcp={got_ver} generation={got_gen} (want {want_ver}/{want_gen})")
+
+          bad = []
+          if got_ver != want_ver:
+              bad.append(f"resolved mcp {got_ver}, expected {want_ver}")
+          if got_gen != want_gen:
+              bad.append(f"server.py sees generation {got_gen}, expected {want_gen}")
+          if bad:
+              sys.exit("SDK verification FAILED: " + "; ".join(bad))
+          PY
+
+      # `--require-1x-gated` fails the run unless exactly that many
+      # decorator-gated tests actually EXECUTED. Counting comes from the
+      # report stream, not the short summary (pytest groups identical skip
+      # reasons, so the 13 tests print as only 10 lines).
+      - name: Run test suite
+        run: >-
+          python -m pytest tests/ -q -rs
+          -p no:cacheprovider
+          -p ci_sdk_gate
+          --require-1x-gated=${{ matrix.require_1x_gated }}
+        env:
+          # Lets pytest import the CI-only plugin from .github/.
+          PYTHONPATH: ${{ github.workspace }}/.github

@@ -21,7 +21,22 @@ classifiers = [
     "Topic :: Home Automation",
 ]
 dependencies = [
-    "mcp>=1.2.0",
+    # SDK 2.0 (2026-07-28) removed the low-level @server.list_tools()/
+    # @server.call_tool() decorators; server.py supports both generations.
+    # 2.x is the supported install target: soaked against a real mcp 2.1.1
+    # (initialize / tools/list / a live Blue Iris tools/call, full suite green)
+    # before this floor was set. The floor is 2.1.1 rather than 2.0 because
+    # that is the release actually exercised -- the 2.0.x line was never
+    # tested. The 1.x branch is retained for environments that already have a
+    # 1.x SDK, but packaging no longer selects it.
+    "mcp>=2.1.1,<3",
+    # DIRECT dependency, declared rather than inherited. mcp 2.1.1 does pull
+    # jsonschema>=4.20.0 in transitively, but server.py's compat shim imports
+    # it ITSELF for every known tool call on an SDK that does not self-validate
+    # -- which 2.x is -- and fails CLOSED when it is missing. Relying on the
+    # SDK's transitive dep would make our own validation hostage to a
+    # dependency the SDK is free to drop. Floor matches what mcp pins.
+    "jsonschema>=4.20.0",
     "httpx>=0.27.0",
     "python-dotenv>=1.0.0",
     "platformdirs>=4.0.0",
