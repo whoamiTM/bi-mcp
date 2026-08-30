@@ -21,7 +21,12 @@ from __future__ import annotations
 from typing import Any
 
 from .. import shapers
-from ..client import BiClients
+from ..client import (
+    BiClients,
+    _elide_caller_text,
+    bi_authored_reason,
+    is_terminal_status_message,
+)
 from ..errors import BiBadRequest, BiError, BiMutationsDisabled, BiVerifyInconclusive
 from ..utils.logging import log_tool_usage
 from .registry import mutations_enabled, register_tool
@@ -565,13 +570,23 @@ def _tool_export_clip(client: BiClients, args: dict) -> Any:
         #       polling loops surface real outages instead of mistaking a
         #       network fault for "export completed".
         #
-        #   (b) The exception message must contain `"Clip not BVR"` (the
-        #       literal BI reason for queue graduation, observed in 5.9.9.71).
-        #       Other `result:"fail"` reasons — stale/typoed `@record`,
-        #       "Not found", BI-side rate limits, etc. — also raise bare
-        #       BiError, but they are NOT the documented graduation case.
-        #       Silently shaping them as `{ok:false}` would let a caller
-        #       mistake "BI rejected your path" for "export completed".
+        #   (b) The exception message must report a known terminal status
+        #       (`"Clip not BVR"` is the BI reason for queue graduation
+        #       observed in 5.9.9.71). Other `result:"fail"` reasons —
+        #       stale/typoed `@record`, "Not found", BI-side rate limits,
+        #       etc. — also raise bare BiError, but they are NOT the
+        #       documented graduation case. Silently shaping them as
+        #       `{ok:false}` would let a caller mistake "BI rejected your
+        #       path" for "export completed".
+        #
+        #       The check delegates to `is_terminal_status_message` — the
+        #       same `_TERMINAL_STATUSES` source the client classifies
+        #       against. A literal `"Clip not BVR" in str(e)` here matched
+        #       only one casing, so `"CLIP NOT BVR"` classified terminal
+        #       (no re-login) and then raised instead of returning the
+        #       documented envelope. Sharing the predicate also means a
+        #       status added to `_TERMINAL_STATUSES` reaches both sides
+        #       with no second edit here.
         #
         #   (c) `raw=True` must surface the typed BiError verbatim — we
         #       cannot fabricate an envelope here because the `raw` contract
@@ -584,7 +599,7 @@ def _tool_export_clip(client: BiClients, args: dict) -> Any:
         except BiError as e:
             if type(e) is not BiError:
                 raise  # typed subclass — durable failure, not a queue miss
-            if "Clip not BVR" not in str(e):
+            if not is_terminal_status_message(str(e)):
                 raise  # bare BiError but unknown reason — also surface it
             if args.get("raw"):
                 raise  # raw=true contract: no fabricated envelopes
@@ -750,6 +765,19 @@ _CLIPSTATS_NOT_A_CLIP_FRAGMENTS = (
 )
 
 
+# BI reasons that mean "the read user lacks the permission `update` needs",
+# i.e. the ones that authorise the admin-credentialed retry below. Hoisted
+# from the inline `or` they used to be spelled as so the SAME tuple can be
+# handed to `_elide_caller_text`'s fragment guard — a needle that is a strict
+# piece of one of these must not be elided, or it shreds the marker it is a
+# piece of (`memo="authorized"` vs BI's own "Not authorized"). One tuple, so
+# the matcher and its guard can never name different markers.
+_UPDATE_ACCESS_DENIED_FRAGMENTS = (
+    "access denied",
+    "not authorized",
+)
+
+
 def _read_record_state(client: BiClients, path: str) -> tuple[Any, Any]:
     """Pre-read memo + flags for the target @record via `clipstats`.
 
@@ -777,8 +805,31 @@ def _read_record_state(client: BiClients, path: str) -> tuple[Any, Any]:
         raw = client.call("clipstats", path=path)
     except BiError as e:
         if type(e) is BiError:
-            msg = str(e).lower()
-            if any(frag in msg for frag in _CLIPSTATS_NOT_A_CLIP_FRAGMENTS):
+            # Narrow to text BI actually authored before matching. Two
+            # separate sources of caller-controlled text had to go:
+            #
+            #   * the wrapper (`"Blue Iris cmd=<cmd> failed: "`), stripped by
+            #     the same anchored parse the terminal-status predicate uses —
+            #     a second private copy of that parsing is how these two
+            #     matchers drifted apart in the first place; and
+            #   * `path` itself, which is free text and which BI ECHOES inside
+            #     its own reason ("Not found: @no clip"). Extraction alone does
+            #     not remove it, so `path` is elided from the reason too.
+            #
+            # Without both, the caller's own path manufactured the verdict:
+            # `path="@no clip"` turned a plain "not found" into a confident
+            # (and wrong) "your record isn't clip-backed".
+            #
+            # Substring semantics against the remaining text are KEPT on
+            # purpose — BI's real not-a-clip wording is undocumented and
+            # varies, so only the search SPACE is narrowed, not the match.
+            # Elision goes through `_elide_caller_text` rather than a bare
+            # `str.replace`: see that helper for why an empty/short needle
+            # made a raw replace shred BI's own wording (false NEGATIVE).
+            reason = _elide_caller_text(
+                bi_authored_reason(str(e)), path, _CLIPSTATS_NOT_A_CLIP_FRAGMENTS
+            )
+            if any(frag in reason for frag in _CLIPSTATS_NOT_A_CLIP_FRAGMENTS):
                 raise BiBadRequest(
                     f"bi_update_record pre-read: Blue Iris rejected {path!r} "
                     f"via clipstats as not a clip-backed record ({e}). v1 "
@@ -863,8 +914,44 @@ def _tool_update_record(client: BiClients, args: dict) -> Any:
     try:
         raw = client.call_raw("update", **payload)
     except BiError as e:
-        msg = str(e).lower()
-        if type(e) is BiError and ("access denied" in msg or "not authorized" in msg):
+        # Narrow to text BI actually authored before matching — the SAME
+        # anchoring the not-a-clip remap (`_read_record_state`) and the
+        # export graduation guard (`is_terminal_status_message`) already use.
+        # This is the third site of the identical hazard: `str(e)` carries
+        # both the wrapper frame AND the caller's `path`, which BI echoes
+        # back inside its own reason ("Not found: @access denied"). Matching
+        # the whole message let a caller-planted path steer an
+        # admin-credentialed retry of a MUTATION from what was really a
+        # non-auth failure. Substring semantics against the REMAINDER are
+        # kept on purpose — BI's real access-denial wording varies; only the
+        # search space is narrowed, not the match.
+        #
+        # `memo` is elided alongside `path` because it is the OTHER
+        # caller-controlled string in this very payload. Whether BI echoes a
+        # rejected memo back is unverified on 5.9.9.71 — but the cost of
+        # assuming it does not is an admin-credentialed retry of a mutation
+        # steered by caller text, and the cost of assuming it does is at most
+        # a real "access denied" going un-graduated when the caller happened
+        # to put that phrase in their own memo (loud, and self-inflicted).
+        # Defence in depth on the cheaper side of that trade.
+        #
+        # Both elisions carry this site's own marker tuple, so a needle that
+        # is a strict PIECE of a marker is left alone: `memo="authorized"` is
+        # 10 chars, clears the length floor, and would otherwise shred BI's
+        # genuine "Not authorized" into "not  " — killing the very admin
+        # retry this block exists to make, and (with no admin configured)
+        # costing the caller the actionable `BiAdminRequired` below. See
+        # `_is_marker_fragment`: a strict fragment carries no marker, so
+        # skipping it cannot admit a forge.
+        reason = bi_authored_reason(str(e))
+        msg = _elide_caller_text(
+            _elide_caller_text(reason, path, _UPDATE_ACCESS_DENIED_FRAGMENTS),
+            str(payload.get("memo", "")),
+            _UPDATE_ACCESS_DENIED_FRAGMENTS,
+        )
+        if type(e) is BiError and any(
+            frag in msg for frag in _UPDATE_ACCESS_DENIED_FRAGMENTS
+        ):
             if client.resolve_admin() is None:
                 from ..errors import BiAdminRequired
                 raise BiAdminRequired(

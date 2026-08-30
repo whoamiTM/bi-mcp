@@ -25,3 +25,22 @@ id = "bi-reg-ippw-base64"
 description = "Blue Iris camera password: ippw registry value with base64 payload in text form"
 regex = '''(?i)\bippw\b[^A-Za-z0-9+/\n]{1,16}[A-Za-z0-9+/]{8,}={0,2}'''
 keywords = ["ippw"]
+
+# Allowlist: prose that NAMES the `ippw` field without carrying a payload.
+#
+# The rule's separator class ([^A-Za-z0-9+/\n]{1,16}) lets a backtick+space
+# bridge `ippw` to the next English word, so documentation explaining WHY the
+# hives are gitignored ("hives carry `ippw` credentials") scores as base64.
+# Two such lines exist in tests/. The fix belongs here, not in the prose —
+# rewording docs to dodge a scanner trains the wrong reflex.
+#
+# Scope is deliberately narrow: it keys on the FINDING TEXT (regexTarget =
+# "match"), matching only `ippw` followed by the literal English word
+# "credentials". It is NOT path-scoped — a real `ippw = <base64>` pasted into
+# tests/conftest.py, or anywhere else, still fires. The only thing exempted is
+# the word "credentials" itself, which is not a valid base64 payload for any
+# secret we care about.
+[[rules.allowlists]]
+targetRules = ["bi-reg-ippw-base64"]
+regexTarget = "match"
+regexes = ['''(?i)\bippw`?\s*credentials\b''']

@@ -27,6 +27,8 @@ from bi_mcp.errors import BiNotFound
 from bi_mcp.reg import list_reg_cameras, parse_reg
 from bi_mcp.shapers import _ACTION_TYPE, shape_actionset
 
+from tests.conftest import requires_fixture, requires_reg_hives
+
 # Action-row keys live under both hook subtrees — the type-union must
 # scan both, since `_shape_action_entry` decodes them identically.
 _ACTION_ROW_PREFIXES = ("Alerts\\OnTrigger\\", "Alerts\\OnReset\\")
@@ -41,6 +43,7 @@ CLONE_FIXTURE_SHORT = "clone_seccam_10_test"
 
 @pytest.fixture(scope="module")
 def clone_actionset() -> dict:
+    requires_fixture(CLONE_FIXTURE_SHORT)
     parsed, age_days = parse_reg(CLONE_FIXTURE_SHORT, key_path="Alerts")
     return shape_actionset(parsed, camera_short=CLONE_FIXTURE_SHORT,
                            mtime_age_days=age_days, hook="both")
@@ -129,6 +132,7 @@ def test_production_hives_cover_every_mapped_action_type() -> None:
       - or re-export a camera that uses that action kind so the
         decoder gets real coverage.
     """
+    requires_reg_hives()
     expected = set(_ACTION_TYPE.keys())
     seen, per_int = _collect_seen_type_ints()
     missing = expected - seen
@@ -154,6 +158,7 @@ def test_production_hives_decode_with_no_unknown_types() -> None:
     map. Overlaps with the union test above but reports differently — this
     one fires per-row, useful when only one camera is affected.
     """
+    requires_reg_hives()
     offenders: list[tuple[str, int, int | None]] = []  # (camera, row_idx, raw_type)
     for short in list_reg_cameras():
         try:
@@ -194,6 +199,7 @@ def test_trig_source_raw_preserves_bit7_decoded_list_excludes_it() -> None:
     The test fails only if someone re-introduces a mask before raw
     assignment, or accidentally adds bit 7 to the decoded label map.
     """
+    requires_reg_hives()
     valid_source_labels = {"motion", "onvif", "audio", "external", "dio", "group", "ai"}
     rows_with_trig_source = 0
     bit7_set_count = 0

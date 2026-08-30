@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 from .. import shapers
-from ..client import BiClients
+from ..client import (
+    BiClients,
+    _elide_caller_text,
+    bi_authored_reason,
+    echoed_caller_text,
+)
 from ..errors import (
     BiAdminAuthFailed,
     BiAdminRequired,
@@ -17,6 +22,20 @@ from ..errors import (
 from ..utils.logging import log_tool_usage
 from .registry import register_tool
 from .tools_status import COMMON_SCHEMA
+
+
+# BI reasons that mean "the camconfig path is unavailable to us" rather than
+# "this request was bad". Matched as substrings against the BI-authored reason
+# because BI's wording for cmd-not-recognised / capability denial is
+# undocumented. Module-level so the elision-safety test can enumerate it (see
+# tests/unit/test_elidable_needle_floor.py) — a fragment shorter than
+# `_MIN_ELIDABLE_NEEDLE` added here would silently disable the elision guard.
+_CAMCONFIG_FALLBACK_FRAGMENTS = (
+    "access denied",
+    "unknown",
+    "invalid",
+    "not supported",
+)
 
 
 @log_tool_usage("bi_list_cameras")
@@ -69,8 +88,45 @@ def _tool_get_camera_config(client: BiClients, args: dict) -> Any:
         except BiAuthFailed as e:
             admin_error = str(e)
         except BiError as e:
-            msg = str(e).lower()
-            if any(kw in msg for kw in ("access denied", "unknown", "invalid", "not supported")):
+            # Narrow to text BI actually authored, and drop the caller's own
+            # `short` from it, before matching — the same anchoring
+            # `bi_update_record` uses on both of its matchers. `str(e)` carries
+            # the wrapper frame AND `short`, which BI echoes back in its reason
+            # ("Not found: <short>"). Under a whole-message match a camera
+            # merely NAMED `invalid-cam` or `unknown-2` swallowed a real BI
+            # fault and silently downgraded the caller to the shallow camlist
+            # fallback — no adversary required, just a plausible short name.
+            # Substring semantics on the remainder are kept: BI's wording for
+            # "cmd not recognised" / capability denial is undocumented.
+            #
+            # Elide `short` ONLY where BI demonstrably echoed it — i.e. where
+            # it is the whole remainder after a colon ("Not found: <short>").
+            # A blanket elision of every occurrence was worse than the hole it
+            # closed: two of the fragments below are ordinary English words,
+            # and a blanket pass cannot tell the caller's echoed name from the
+            # SAME word BI authored itself. A camera legitimately named
+            # `unknown` turned BI's own "Unknown command" into " command", the
+            # fragment vanished, and this tool RAISED instead of degrading to
+            # the documented shallow camlist fallback — no adversary needed,
+            # just an ordinary name. `echoed_caller_text` returns "" when the
+            # reason is not an echo, and `_elide_caller_text`'s length floor
+            # turns that into a no-op, so the reason is matched as BI wrote it.
+            #
+            # The fragment tuple is passed as well, so a `short` that is a
+            # strict PIECE of a fragment (`supported` inside "not supported",
+            # 9 chars and so past the length floor) cannot shred the fragment
+            # it belongs to. Belt-and-braces here rather than a live fix:
+            # `echoed_caller_text` already blocks that path, because BI's own
+            # "Not supported" is not an echo of the name and yields an empty
+            # needle. It is passed anyway so this site does not depend on the
+            # gate in front of it staying exactly as narrow as it is today.
+            reason = bi_authored_reason(str(e))
+            msg = _elide_caller_text(
+                reason,
+                echoed_caller_text(reason, short),
+                _CAMCONFIG_FALLBACK_FRAGMENTS,
+            )
+            if any(kw in msg for kw in _CAMCONFIG_FALLBACK_FRAGMENTS):
                 admin_error = str(e)
             else:
                 raise

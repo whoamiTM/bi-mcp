@@ -22,6 +22,8 @@ from __future__ import annotations
 import pytest
 
 from bi_mcp.reg import parse_reg
+from tests.conftest import requires_fixture
+
 from bi_mcp.shapers import (
     _PROFILE_SYNC_PAGES,
     _annotate_profile_sync_passthroughs,
@@ -31,6 +33,14 @@ from bi_mcp.shapers import (
 
 
 def _shaped(camera_short: str) -> dict:
+    """Shape a real hive, skipping the caller if that hive isn't available.
+
+    The hives are local-only (gitignored — they carry `ippw` credentials),
+    so on an external clone these tests skip rather than fail. The
+    table-driven tests above still run everywhere: they use synthetic dicts
+    and are the ones that actually pin the classifier contract.
+    """
+    requires_fixture(camera_short)
     parsed, age_days = parse_reg(camera_short)
     return shape_reg(parsed, camera_short=camera_short, mtime_age_days=age_days)
 
@@ -160,10 +170,12 @@ def test_passthrough_marker_present_on_sync1_blank_camsync() -> None:
     out = _shaped("clone_seccam_10_test")
     data = out["data"]
     # clone_seccam_10_test has Alerts\2..7 all with sync=1, camsync=""
+    matched = 0
     for n in range(2, 8):
         key = f"Alerts\\{n}"
         if key not in data:
             continue
+        matched += 1
         entry = data[key]
         assert entry.get("sync") == 1 and entry.get("camsync", "") == "", (
             f"Fixture changed shape — {key} should still be sync=1, camsync=''"
@@ -171,6 +183,20 @@ def test_passthrough_marker_present_on_sync1_blank_camsync() -> None:
         assert entry.get("_synced_with") == "profile_1", (
             f"{key} should be annotated as sync-with-profile_1 passthrough"
         )
+    # POSITIVE CONTROL. Every assertion above sits behind `if key not in
+    # data: continue`, so with no matching rows the loop body never runs and
+    # the test passes having proved nothing — green on a `_shaped` stubbed to
+    # return `{"data": {}}`, or on a parser that silently stopped emitting
+    # profile subkeys. The instrument has to be shown live before its silence
+    # counts as a pass. Skipping when the hive is absent is `requires_fixture`'s
+    # job (in `_shaped`); reaching here with zero rows means the hive parsed
+    # but the data is gone, which is a real failure, not a skip.
+    assert matched, (
+        "No Alerts\\2..7 rows found in clone_seccam_10_test — the annotation "
+        "assertions above never executed, so this test proved nothing. Either "
+        "the fixture lost its profile subkeys or parsing/shaping is returning "
+        "no profile data."
+    )
 
 
 def test_passthrough_marker_absent_when_sync_zero() -> None:

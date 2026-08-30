@@ -14,6 +14,8 @@ import pytest
 from bi_mcp.errors import BiError
 from bi_mcp.reg import _MAX_HIVE_DEPTH, _MAX_HIVE_KEYS, _walk, parse_reg
 
+from tests.conftest import available_reg_shorts, requires_reg_hives
+
 
 def _camera_shorts(cam_dir: Path) -> list[str]:
     """Camera short names that have a .reg export (excludes .backup/.txt etc.)."""
@@ -21,12 +23,19 @@ def _camera_shorts(cam_dir: Path) -> list[str]:
 
 
 def test_at_least_one_reg_file_exists(cam_settings_dir: Path) -> None:
-    """If this fails, the fixtures we test against are gone — bail early."""
+    """If this fails, the hives we test against are gone — bail early.
+
+    Gated: an external clone has no hives at all, which is expected rather
+    than a regression. `requires_reg_hives` skips there so the assertion
+    only runs where it can actually be false.
+    """
+    requires_reg_hives()
     shorts = _camera_shorts(cam_settings_dir)
     assert shorts, f"no .reg files found under {cam_settings_dir}"
 
 
-@pytest.mark.parametrize("short", _camera_shorts(Path(__file__).resolve().parents[2].parent / "cam settings"))
+@pytest.mark.parametrize("short", available_reg_shorts() or [pytest.param("", marks=pytest.mark.skip(
+    reason="No .reg hives available (local-only; see conftest.requires_reg_hives)"))])
 def test_each_reg_file_parses_without_error(short: str) -> None:
     """Each .reg in cam settings/ parses to a non-empty dict."""
     parsed, age_days = parse_reg(short)
@@ -43,7 +52,9 @@ def test_reg_parser_returns_flat_backslash_joined_subkey_paths() -> None:
     Pins down the contract: callers walk by string-prefix matching (e.g.
     ``Alerts\\OnTrigger\\``), not by nested dict traversal.
     """
-    parsed, _ = parse_reg("SecCam_3")
+    requires_reg_hives()
+    short = available_reg_shorts()[0]
+    parsed, _ = parse_reg(short)
     # No nested dicts — every value at top level is a dict-of-values, not a dict-of-subkeys.
     for k, v in parsed.items():
         assert isinstance(k, str) and k, "registry path keys must be non-empty strings"
