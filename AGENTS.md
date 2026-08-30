@@ -591,6 +591,25 @@ real regressions while still flipping to `XPASS`-fail the moment the gap
 is closed. Without that conversion, red-as-a-todo blurs into noise and
 real regressions get missed.
 
+### CI matrix (`.github/workflows/ci.yml`)
+
+`server.py` supports both MCP SDK generations (1.x low-level decorators, 2.x
+constructor kwargs), but a venv holds one SDK at a time, so locally half that
+surface is always dark. CI runs the suite twice on Python 3.12, against mcp
+`1.27.1` and `2.1.1`. Packaging pins `mcp>=2.1.1,<3`, so a local checkout is a
+2.x box and the 13 tests gated behind `@_needs_1x_decorator` skip there; that
+is expected, not a gap. The `.github/ci_sdk_gate.py` plugin fails the 1.x leg
+if those 13 skip instead of execute, so the leg cannot pass vacuously.
+
+| Environment | 1x-gated tests | Note |
+| ----------- | -------------- | ---- |
+| local / CI 2.x leg | skip (0 executed) | expected on `mcp>=2.1.1` |
+| CI 1.x leg | 13 executed | gate fails the run otherwise |
+
+Dev deps are a PEP 735 `[dependency-groups]`, **not** an extra: `pip install
+-e ".[dev]"` installs nothing and exits 0. Use `pip install -e .` then `pip
+install --group dev` (pip >= 25.1), or `uv sync`.
+
 ---
 
 ## Version handling

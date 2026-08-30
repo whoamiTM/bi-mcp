@@ -258,11 +258,28 @@ file in this repo shows the format.
 
 ### For contributors (editing the source)
 
+[![tests](https://github.com/whoamiTM/bi-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/whoamiTM/bi-mcp/actions/workflows/ci.yml)
+
 ```bash
 git clone https://github.com/whoamiTM/bi-mcp
 cd bi-mcp
-uv sync                       # or: python -m venv .venv && source .venv/bin/activate && pip install -e .[dev]
+uv sync
 uv run bi-mcp-server check
+```
+
+If you'd rather use plain `pip`, note that the development dependencies are
+declared as a PEP 735 dependency group rather than as an extra, so they need
+their own install step and a pip new enough to understand `--group`. Running
+`pip install -e .[dev]` instead will quietly install nothing and exit 0,
+leaving you without pytest.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade "pip>=25.1"
+pip install -e .
+pip install --group dev
+pytest tests/ -q
 ```
 
 ## Tool reference
