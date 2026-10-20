@@ -32,6 +32,7 @@ from .tools_status import COMMON_SCHEMA
 
 _SHORT_NAME_RE = re.compile(r"\A[A-Za-z0-9_\-]+\Z")
 _RECORD_RE = re.compile(r"\A\d+\Z")
+_SUFFIX_RE = re.compile(r"\.(?:bvr|jpg)\Z")
 
 
 @log_tool_usage("bi_get_alert_image")
@@ -91,12 +92,15 @@ def _tool_get_alert_image(client: BiClients, args: dict) -> Any:
         raise BiNotFound(
             f"Alert for {short} has no 'path' record; cannot fetch its image"
         )
-    record = str(raw_path).removeprefix("@").removesuffix(".bvr")
+    # `.jpg` is a still-only alert: the camera doesn't record in the active
+    # profile, so BI keeps the alert as a JPEG with no BVR behind it. The
+    # `/alerts/@<digits>` form serves both kinds (live-verified 2026-10-19).
+    record = _SUFFIX_RE.sub("", str(raw_path).removeprefix("@"))
     if not _RECORD_RE.fullmatch(record):
         # Guard against a crafted path redirecting the /alerts/ endpoint, same
         # spirit as the snapshot tool's short-name guard.
         raise BiBadRequest(
-            f"Unexpected alert record {raw_path!r}: expected '@<digits>[.bvr]'"
+            f"Unexpected alert record {raw_path!r}: expected '@<digits>[.bvr|.jpg]'"
         )
 
     params: dict[str, Any] = {}

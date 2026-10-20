@@ -6,7 +6,7 @@ Covers:
     time, and memo echoed back.
   * Defensive ordering: when the alertlist comes back NOT newest-first, the
     tool still picks the latest by timestamp (it doesn't trust array position).
-  * `.bvr` suffix and `@` prefix on the alert path are stripped before the
+  * `.bvr`/`.jpg` suffix and `@` prefix on the alert path are stripped before the
     /alerts/@<record> fetch.
   * `at` time arg is parsed and forwarded as `enddate` to alertlist.
   * `markup` toggles the v=2 query param.
@@ -155,3 +155,31 @@ def test_rejects_index_all_cameras_selector(index_name: str) -> None:
     with pytest.raises(BiBadRequest):
         _tool_get_alert_image(client, {"camera": index_name})  # type: ignore[arg-type]
     assert client.cmd_calls == [], "must reject Index before any alertlist call"
+
+
+def test_jpg_still_alert_record_is_fetched() -> None:
+    # A camera that doesn't record in the active profile stores its alert as a
+    # JPEG with no BVR behind it (SecCam_12, profile 1/3, 2026-10-19). The path
+    # then ends in .jpg, and /alerts/@<digits> serves the still.
+    client = _StubClient(
+        alerts=[
+            {
+                "path": "@12856749679.jpg",
+                "clip": "@-1.jpg",
+                "file": "SecCam_12.20261019_181527.0.3-1.jpg",
+                "date": "2026-10-19T22:15:27+00:00",
+                "memo": "",
+            }
+        ]
+    )
+    out = _tool_get_alert_image(client, {"camera": "SecCam_12"})  # type: ignore[arg-type]
+    assert out["alert_record"] == "@12856749679"
+    assert client.byte_calls == [("/alerts/@12856749679", {})]
+
+
+@pytest.mark.parametrize("bad_path", ["@12.jpg.bvr", "@../x.jpg", "@12.png", "@.jpg"])
+def test_rejects_malformed_alert_record(bad_path: str) -> None:
+    client = _StubClient(alerts=[{"path": bad_path, "date": "2026-10-19T22:15:27+00:00"}])
+    with pytest.raises(BiBadRequest):
+        _tool_get_alert_image(client, {"camera": "SecCam_12"})  # type: ignore[arg-type]
+    assert client.byte_calls == [], "a malformed record must never reach /alerts/"

@@ -652,7 +652,7 @@ def _tool_explain_alert_chain(client: BiClients, args: dict) -> Any:
     if not path:
         raise BiBadRequest(
             "bi_explain_alert_chain requires a 'path' argument (alert path "
-            "from bi_list_alerts, e.g. '@4473131744.bvr')"
+            "from bi_list_alerts, e.g. '@4473131744.bvr' or a still-only '@12856749679.jpg')"
         )
 
     if client.resolve_admin() is None:
@@ -681,22 +681,36 @@ def _tool_explain_alert_chain(client: BiClients, args: dict) -> Any:
         )
 
     # Guard against clip-path-instead-of-alert-path. BI's clipstats
-    # accepts both, but returns alert-specific fields only for an alert
-    # path. A clip path comes back with ``alertmsec: 0`` and ``memo:
-    # None``, and the tool would silently analyze the wrong epoch and
-    # report "everything's normal" — strictly worse than an error.
-    # Detect by alertmsec=0 (real alerts always have non-zero alert
-    # length) AND no memo (real alerts almost always have a memo on an
-    # AI-equipped install). The bi_list_alerts response shape exposes
-    # ``path`` (alert id) and ``clip`` (parent clip id); the alert path
-    # is what's wanted.
-    if (
-        not clip_info.get("alertmsec")
-        and not clip_info.get("memo")
-    ):
+    # accepts both; a clip path would make the tool silently analyze the
+    # wrong epoch and report "everything's normal" — strictly worse than
+    # an error. A recorded alert has a non-zero alert length, and an
+    # AI-confirmed one has a memo; a clip has neither. A still-only `.jpg`
+    # alert (camera not recording in the active profile, no AI) has
+    # neither too, so for that ambiguous case ask the Alerts list itself:
+    # an alert's path is listed by alertlist at its own `date`, a clip's
+    # never is (live-verified 2026-10-19 on 3 cameras). ``filetype``'s
+    # "... Alerts" suffix can't decide it — that token is the folder's
+    # display name, which users can rename. The bi_list_alerts response
+    # shape exposes ``path`` (alert id) and ``clip`` (parent clip id); the
+    # alert path is what's wanted.
+    is_alert = bool(clip_info.get("alertmsec") or clip_info.get("memo"))
+    if not is_alert:
+        raw_date = clip_raw.get("date") if isinstance(clip_raw, dict) else None
+        if isinstance(raw_date, (int, float)):
+            listed = client.call(
+                "alertlist",
+                camera=camera,
+                startdate=int(raw_date) - 1,
+                enddate=int(raw_date) + 1,
+            )
+            is_alert = isinstance(listed, list) and any(
+                isinstance(a, dict) and a.get("path") == path for a in listed
+            )
+    if not is_alert:
         raise BiBadRequest(
             f"bi_explain_alert_chain: path {path!r} resolved to a clip-"
-            f"level record (alertmsec=0, no memo), not an alert. From "
+            f"level record (alertmsec=0, no memo, not in the Alerts list), "
+            f"not an alert. From "
             f"bi_list_alerts, pass the alert's `path` field (e.g. the "
             f"alert id), NOT the alert's `clip` field (the parent clip). "
             f"Multiple alerts can share one clip, so the clip path "
@@ -902,7 +916,8 @@ def register() -> None:
                     "type": "string",
                     "description": (
                         "Alert path from bi_list_alerts (e.g. "
-                        "'@4473131744.bvr'). Required."
+                        "'@4473131744.bvr', or '@12856749679.jpg' for a "
+                        "still-only alert). Required."
                     ),
                 },
                 "max_alert_age_h": {
