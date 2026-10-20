@@ -67,7 +67,7 @@ For static facts (camera → IP, role, friendly name), do **not** call
 | `bi_list_log`           | `log`        |   ✓    |           | System log entries with filters (since/camera/obj/levels/match/regex). Returns {entries, scanned, matched, warning?} |
 | `bi_get_reg`            | (file)       |        |           | .reg hive parse — for what the API can't reach                 |
 | `bi_get_actionset`      | (file)       |        |           | Semantic view of Alerts\\OnTrigger / OnReset (decoded)         |
-| `bi_audit_actions`      | (file)       |        |           | Cross-camera cohort-divergence report — buckets action rows by (type, description, type-specific key) and surfaces fields where one row's value deviates from the cohort majority as `outliers`. **Informational only** — outliers may be intentional per-camera customizations; present findings for user review, not as bugs to fix. Templates per-camera tokens (`ai/<CAM>/motion`) before comparison. Re-surfaces raw `trig_object`/`trig_skip` to catch case-sensitivity differences the shaper would otherwise normalize away. |
+| `bi_audit_actions`      | (file)       |        |           | Cross-camera cohort-divergence report — buckets action rows by (type, description, type-specific key) and surfaces fields where one row's value deviates from the cohort majority as `outliers`; fields with no strict majority appear in `outliers` (in `disabled_outliers` for the `enabled` field) as entries with `no_majority: true` listing each value and its members. **Informational only** — outliers may be intentional per-camera customizations; present findings for user review, not as bugs to fix. Templates per-camera tokens (`ai/<CAM>/motion`) before comparison. Re-surfaces raw `trig_object`/`trig_skip` to catch case-sensitivity differences the shaper would otherwise normalize away. |
 | `bi_trigger_camera`     | `trigger`    |   ✓    |     ✓     | Fire a synthetic motion trigger                                |
 | `bi_set_ptz_preset`     | `ptz` (cmd)  |        |     ✓     | Recall a PTZ preset (1-20)                                     |
 | `bi_set_profile`        | `status` set |   ✓    |     ✓     | Switch active profile                                          |
@@ -78,7 +78,9 @@ For static facts (camera → IP, role, friendly name), do **not** call
 Every tool accepts `raw=true` — returns the underlying BI payload verbatim
 instead of the shaped view. Use it when shaping might be hiding a field
 you need, or when a future BI build's response shape doesn't match the
-shaper.
+shaper. On `bi_list_alerts`/`bi_list_clips`/`bi_list_log` an explicit
+`limit` still caps the raw list (entries stay verbatim; `bi_list_log`'s raw
+path skips the filters).
 
 ---
 
@@ -279,9 +281,9 @@ bi_list_alerts(camera="SecCam_3", limit=1)  → memo should appear
 
 | `ok`  | `verified` | Meaning | Action |
 |-------|------------|---------|--------|
-| true  | true       | BI accepted AND post-read confirmed the change | Done |
+| true  | true       | `reset`/`reboot` only: BI accepted AND the stream dip was observed | Done |
 | true  | false      | BI accepted but post-read couldn't confirm (verify-side blip, or stream-dip not seen for reboot/reset) | Re-read state manually; do NOT blindly retry — some ops are not idempotent (`pause` is additive, `reboot`/`reset` are disruptive) |
-| true  | omitted    | BI accepted; this op verifies via the response itself (no post-read needed) | Done |
+| true  | omitted    | All other ops: BI accepted AND the camconfig/camlist post-read confirmed the change | Done |
 | false | —          | BI rejected the write | Read `reason` and decide |
 
 When `verified=false`, look at `verify_error_kind`:
@@ -292,6 +294,16 @@ When `verified=false`, look at `verify_error_kind`:
 - `verify_unreachable` — network blip / BI restart. Almost always
   transient; one retry is usually fine, but still re-read first to avoid
   duplicating non-idempotent side effects.
+- `verify_error` — the verify read failed some other way (HTTP 5xx,
+  non-JSON, 404) after the write was accepted. Both `bi_set_camera` and
+  `bi_set_profile` return it. Re-read before retrying.
+- `verify_mismatch` — the post-read shows a value other than the one sent.
+  `bi_set_profile` returns it on a profile mismatch or an unchanged `lock`
+  after `-1` (a second `-1` toggles again). `bi_set_camera` returns it for
+  any post-read mismatch (profile, lock, op value, rename collision) and for
+  a `reset` with no stream dip, with `previous` intact. For `lock=false`
+  coerced to BI's sticky `lock=2` or `profile=-1` coerced to the global, the
+  `verify_error` text names the way out: enable=false, then enable=true.
 
 ### Rule 3 — Revert global state before turn end
 
@@ -319,9 +331,17 @@ bi_set_profile(profile=prev_profile)
 
 The tool does a mandatory `bi_get_status` pre-read to capture
 `previous_profile` and `previous_lock`, and a mandatory post-read to verify
-the requested change actually landed. The return value includes both
-`{profile, lock, previous_profile, previous_lock}` so the agent can revert
-either axis. Always revert before turn end unless the user asked for a
+the requested change actually landed. The return value is
+`{ok, verified, profile, lock, previous_profile, previous_lock}` (plus
+`verify_error_kind`/`verify_error` when unverified) so the agent can revert
+either axis. `ok` is write-acceptance only; a post-read mismatch comes back
+as `verified:false, verify_error_kind:"verify_mismatch"` rather than a
+raised error, and any verify-read failure after an accepted write (auth
+blip, unreachable, HTTP 5xx, non-JSON, 404) comes back as `verified:false`
+with `verify_error_kind` `verify_auth_blip`/`verify_unreachable`/
+`verify_error` — never raised — so `previous_*` are returned either way
+(`bi_set_camera` reports verify-read failures and mismatches the same way). `verified` is
+always present (unlike `bi_set_camera`, which omits it on a clean verify). Always revert before turn end unless the user asked for a
 persistent change.
 
 ### Rule 4 — Don't loop `bi_trigger_camera`
@@ -479,7 +499,11 @@ The mapping to `ErrorCode`:
 
 **Retry rules:** transient session-expiry is handled inside `BiClient.call`
 (one auto re-login + retry, taken only when the fail reason is auth-class
-or unclassifiable; non-auth failures like "Access denied" — per-cmd
+or unclassifiable — except that an unclassifiable fail on a MUTATING cmd
+(trigger, update; `ptz` with `button`; status/camconfig/export when carrying
+write keys — a `ptz` read with only `camera` still retries)
+raises `BiError` without a retry, since a re-POST could execute it twice;
+non-auth failures like "Access denied" — per-cmd
 capability gating on a valid session — raise immediately without a retry).
 Beyond that, the agent should NOT retry — all the typed errors above are
 durable failures that need a different input or a config fix.

@@ -187,3 +187,17 @@ def test_parse_hive_key_budget_is_shared_across_subtrees(
     with pytest.raises(BiError, match="more than 100000 keys"):
         reg_mod._parse_hive(Path("/unused"), key_path=None)
 
+
+
+@pytest.mark.parametrize("spelling", ["ai\\2", "AI\\2\\", "Ai\\2"])
+def test_key_path_output_uses_canonical_hive_spelling(spelling: str) -> None:
+    """python-registry's ``find_key`` is case-insensitive and tolerates a
+    trailing backslash, so a non-canonical ``key_path`` resolves fine. The
+    output keys must still use the hive's OWN spelling: the shaper's
+    annotators (``_synced_with`` etc.) match page names exactly, and echoing
+    the caller's spelling silently dropped them (audit A1)."""
+    requires_reg_hives()
+    short = available_reg_shorts()[0]
+    canonical, _ = parse_reg(short, key_path="AI\\2")
+    variant, _ = parse_reg(short, key_path=spelling)
+    assert list(variant) == list(canonical)

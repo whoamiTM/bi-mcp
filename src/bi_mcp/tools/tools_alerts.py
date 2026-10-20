@@ -32,10 +32,19 @@ def _tool_list_alerts(client: BiClients, args: dict) -> Any:
                 payload[k] = parse_since(args[k], arg_name=k)
             except ValueError as e:
                 raise BiBadRequest(str(e)) from e
+    # limit: null/absent = default; a non-integer is a caller error.
+    limit_arg = args.get("limit")
+    try:
+        limit = 50 if limit_arg is None else int(limit_arg)
+    except (TypeError, ValueError) as e:
+        raise BiBadRequest(f"limit must be an integer (got {limit_arg!r})") from e
     raw = client.call("alertlist", **payload)
     if args.get("raw"):
+        # An explicit limit still caps a raw list (entries stay verbatim).
+        if args.get("limit") is not None and isinstance(raw, list):
+            return raw[: max(0, limit)]
         return raw
-    return shapers.shape_alerts(raw, limit=int(args.get("limit", 50)))
+    return shapers.shape_alerts(raw, limit=limit)
 
 
 @log_tool_usage("bi_get_alert_tracks")
@@ -118,7 +127,7 @@ def register() -> None:
                     ),
                 },
                 "search": {"type": "string", "description": "Memo substring filter (server-side)."},
-                "limit": {"type": "integer", "description": "Max alerts (default 50)."},
+                "limit": {"type": "integer", "description": "Max alerts (default 50). An explicit limit also caps raw=true output."},
             },
             "required": ["camera"],
             "additionalProperties": True,

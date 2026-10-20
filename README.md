@@ -286,7 +286,8 @@ pytest tests/ -q
 
 19 read tools register by default. The 6 mutating tools register only when
 `BI_MCP_ALLOW_MUTATIONS=1`. Pass `raw=true` on any tool to get the unshaped
-Blue Iris JSON.
+Blue Iris JSON (on `bi_list_alerts`/`bi_list_clips`/`bi_list_log` an explicit
+`limit` still caps the list).
 
 For the canonical reference with routing tables, error taxonomy, and
 mutation-safety rules, see [AGENTS.md](AGENTS.md).
@@ -310,8 +311,8 @@ mutation-safety rules, see [AGENTS.md](AGENTS.md).
 | `bi_list_log` | `log` | ✓ | | Recent BI system log entries. |
 | `bi_get_reg` | (file parser) | | | Parse `.reg` camera export: trigger zones, AI thresholds, per-preset flags. |
 | `bi_get_actionset` | (file parser) | | | Decoded semantic view of `Alerts\OnTrigger` / `OnReset` action rows. |
-| `bi_audit_actions` | (file parser) | | | Cross-camera cohort-divergence report. Surfaces action-row outliers (values that differ from the cohort majority) for user review. Outliers may be intentional per-camera customizations, not bugs. |
-| `bi_explain_alert_chain` | `clipstats` + `log` + (file) | ✓ | | Diagnose one alert: alert facts, per-row filter decode, comparator verdicts for compound/threshold/wait/cross-zone cases, and a ±2-minute log cross-reference of what BI actually did. Refuses alerts older than 24h by default (override with `max_alert_age_h`). |
+| `bi_audit_actions` | (file parser) | | | Cross-camera cohort-divergence report. Surfaces action-row outliers (values that differ from the cohort majority; fields with no strict majority appear as entries with `no_majority: true`, in `disabled_outliers` for the `enabled` field, listing each value and its members) for user review. Outliers may be intentional per-camera customizations, not bugs. |
+| `bi_explain_alert_chain` | `clipstats` + `log` + `alertlist` + (file) | ✓ | | Diagnose one alert: alert facts, per-row filter decode, comparator verdicts for compound/threshold/wait/cross-zone cases, and a ±2-minute log cross-reference of what BI actually did. Refuses alerts older than 24h by default (override with `max_alert_age_h`). |
 | `bi_trigger_camera` | `trigger` | ✓ | ✓ | Fire a synthetic motion trigger (mutations flag). |
 | `bi_set_ptz_preset` | `ptz` (cmd) | | ✓ | Recall a PTZ preset 1-20 (mutations flag). |
 | `bi_set_profile` | `status` (set) | ✓ | ✓ | Switch active profile (mutations flag). |

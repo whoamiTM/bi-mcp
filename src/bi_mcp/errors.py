@@ -112,7 +112,8 @@ class BiVerifyInconclusive(BiError):
     response, not a hard auth/error to the caller. Surfacing this as a
     typed exception keeps the verify helpers ignorant of the dispatcher's
     response shape while letting the dispatcher distinguish verify-side
-    blips from real verify mismatches (which are still ``BiError``).
+    blips from real verify mismatches (both are reported as
+    ``verified=False``, with ``verify_error_kind`` telling them apart).
 
     The two concrete subclasses below — ``BiVerifyAuthBlip`` and
     ``BiVerifyUnreachable`` — carry distinct ``kind`` values so callers can

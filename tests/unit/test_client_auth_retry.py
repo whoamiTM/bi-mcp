@@ -163,10 +163,11 @@ def test_auth_fail_twice_raises_biauthfailed(monkeypatch) -> None:
 def test_reasonless_double_fail_raises_plain_bierror(monkeypatch) -> None:
     """Unclassifiable on BOTH attempts: the defensive default retries, but the
     post-retry exception must be plain BiError — "check your credentials"
-    needs an explicit auth-class reason."""
+    needs an explicit auth-class reason. A READ cmd: a reasonless fail on
+    a write is not retried at all (D7)."""
     c, calls = _client(monkeypatch, [{"result": "fail"}, {"result": "fail"}])
     with pytest.raises(BiError) as exc_info:
-        c.call("ptz")
+        c.call("camlist")
     assert not isinstance(exc_info.value, BiAuthFailed)
     assert _counts(calls) == {"post": 2, "login": 1}
 
@@ -842,3 +843,159 @@ def test_full_marker_residual_control_is_not_vacuous(monkeypatch) -> None:
         "with an ordinary memo the same genuine auth reason must recover — "
         "otherwise the residual tests above prove nothing"
     )
+
+
+def test_overlapping_relogins_never_repost_with_a_cleared_session(monkeypatch) -> None:
+    """Two tool calls share one BiClient across ``asyncio.to_thread``
+    workers. Both hold an expired token; A re-logs in, and B's own
+    auth-retry must not blank the shared token between A's login and A's
+    re-POST — that sent ``session: None``, got an auth fail back, and
+    raised a false ``BiAuthFailed`` ("check your credentials") (audit A2)."""
+    import threading
+
+    c = BiClient(host="test", port=81, user="u", password="p")
+    c.session = "stale"
+    minted: set[str] = set()
+    a_in_login = threading.Event()
+    b_in_login = threading.Event()
+    a_reposted = threading.Event()
+    sent: list[tuple[str, object]] = []
+
+    def fake_post(self, body):
+        me = threading.current_thread().name
+        sent.append((me, body.get("session")))
+        if me == "A" and sum(1 for n, _ in sent if n == "A") == 2:
+            a_reposted.set()
+        if body.get("session") in minted:
+            return {"result": "success", "data": {"ok": 1}}
+        return dict(_FAIL_AUTH)
+
+    def fake_login(self):
+        me = threading.current_thread().name
+        if me == "B":
+            # B has already blanked the shared token (old code) — stay in
+            # that window until A's re-POST has gone out.
+            b_in_login.set()
+            a_reposted.wait(timeout=0.5)
+        tok = f"tok{len(minted) + 1}"
+        minted.add(tok)
+        self.session = tok
+        self.login_data = {"admin": False}
+        if me == "A":
+            a_in_login.set()
+            # Hold A between login and re-POST while B runs its retry.
+            b_in_login.wait(timeout=0.5)
+        return self.login_data
+
+    monkeypatch.setattr(BiClient, "_post", fake_post)
+    monkeypatch.setattr(BiClient, "login", fake_login)
+
+    results: dict[str, object] = {}
+
+    def run_a():
+        try:
+            results["A"] = c.call("status")
+        except BiError as e:  # pragma: no cover - the failure being guarded
+            results["A"] = e
+
+    def run_b():
+        a_in_login.wait(timeout=2)
+        try:
+            results["B"] = c._call_with_auth_retry(
+                "status", {"cmd": "status", "session": "stale"}
+            )
+        except BiError as e:  # pragma: no cover
+            results["B"] = e
+
+    ta = threading.Thread(target=run_a, name="A")
+    tb = threading.Thread(target=run_b, name="B")
+    ta.start(); tb.start(); ta.join(5); tb.join(5)
+    assert results["A"] == {"ok": 1}, (results, sent)
+    assert all(tok is not None for _, tok in sent), sent
+
+
+def test_login_rejection_with_non_dict_data_raises_auth_failed(monkeypatch) -> None:
+    """A step-2 rejection whose ``data`` is not a dict must still surface
+    as ``BiAuthFailed``, not an AttributeError from ``.get`` (audit A4)."""
+    c = BiClient(host="test", port=81, user="u", password="p")
+    replies = [
+        {"result": "fail", "session": "s1"},
+        {"result": "fail", "data": "locked out"},
+    ]
+    monkeypatch.setattr(BiClient, "_post", lambda self, body: replies.pop(0))
+    with pytest.raises(BiAuthFailed) as exc_info:
+        c.login()
+    assert "locked out" in str(exc_info.value)
+
+
+_FAIL_REASONLESS = {"result": "fail"}
+
+
+@pytest.mark.parametrize(
+    "cmd,payload",
+    [
+        ("trigger", {"camera": "SecCam_1"}),
+        ("ptz", {"camera": "SecCam_11", "button": 101}),
+        ("update", {"path": "@123", "memo": "x"}),
+        ("status", {"profile": 2}),
+        ("camconfig", {"camera": "SecCam_1", "pause": -1}),
+        ("export", {"path": "@123", "startms": 0}),
+    ],
+)
+def test_reasonless_fail_on_mutating_cmd_is_not_reposted(monkeypatch, cmd, payload) -> None:
+    """D7: a reason-less fail on a WRITE must not re-login + re-POST — BI
+    may already have acted, and a blind retry executes it twice."""
+    c, calls = _client(monkeypatch, [dict(_FAIL_REASONLESS), dict(_OK)])
+    with pytest.raises(BiError) as exc_info:
+        c.call_raw(cmd, **payload)
+    assert type(exc_info.value) is BiError
+    assert str(exc_info.value).startswith(f"Blue Iris cmd={cmd} failed: ")
+    assert _counts(calls) == {"post": 1, "login": 0}
+
+
+@pytest.mark.parametrize(
+    "cmd,payload",
+    [
+        ("status", {}),
+        ("camconfig", {"camera": "SecCam_1"}),
+        ("export", {"path": "@123"}),
+        ("camlist", {}),
+        # RO1: bi_get_ptz_status reads via `ptz` with only `camera`; the
+        # button write (mutating list above) carries `button`.
+        ("ptz", {"camera": "SecCam_11"}),
+    ],
+)
+def test_reasonless_fail_on_read_cmd_still_retries_once(monkeypatch, cmd, payload) -> None:
+    """D7 leaves reads alone: the historical None-retry still applies."""
+    c, calls = _client(monkeypatch, [dict(_FAIL_REASONLESS), dict(_OK)])
+    assert c.call_raw(cmd, **payload) == _OK
+    assert _counts(calls) == {"post": 2, "login": 1}
+
+
+def test_auth_class_fail_on_mutating_cmd_still_retries(monkeypatch) -> None:
+    """D7 only touches the unclassifiable case; a decided auth fail retries."""
+    c, calls = _client(monkeypatch, [dict(_FAIL_AUTH), dict(_OK)])
+    assert c.call_raw("trigger", camera="SecCam_1") == _OK
+    assert _counts(calls) == {"post": 2, "login": 1}
+
+
+def test_get_bytes_persistent_403_hint_points_at_permissions(monkeypatch) -> None:
+    """A 403 that survives the re-login is per-user access denial, not a
+    malformed argument: the hint must not send the caller to the tool's
+    parameters."""
+    c = BiClient(host="test", port=81, user="u", password="p")
+    c.session = "sess1"
+    gets = []
+
+    def fake_get_raw(self, path, params):
+        gets.append(params["session"])
+        return b"denied", "text/html", 403
+
+    monkeypatch.setattr(BiClient, "_get_raw", fake_get_raw)
+    monkeypatch.setattr(BiClient, "_relogin", lambda self, stale: "sess2")
+
+    with pytest.raises(BiError) as ei:
+        c.get_bytes("/image/cam1")
+    assert gets == ["sess1", "sess2"]
+    assert "malformed" not in ei.value.hint
+    assert "permission" in ei.value.hint.lower()

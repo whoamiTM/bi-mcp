@@ -22,6 +22,7 @@ import contextlib
 import hashlib
 import json
 import re
+import threading
 from typing import Any, Iterator
 
 import httpx
@@ -70,6 +71,39 @@ _AUTH_FAIL_SUBSTRINGS = (
     "authentication",
     "not authenticated",
 )
+
+
+# Cmds that change BI state, as sent by tools/tools_mutations.py. An
+# UNCLASSIFIABLE (reason-less) fail on one of these is NOT re-logged-in and
+# re-POSTed: BI may already have acted before replying fail, and a blind
+# retry executes the mutation twice (a second alert, a doubled pause) —
+# audit D7. Decided auth-class fails still retry for every cmd.
+#   * `_ALWAYS_MUTATING_CMDS` write on every call.
+#   * `_DUAL_USE_CMD_READ_KEYS` are read OR write depending on the payload:
+#     a payload carrying any key outside the cmd's read-only set is a write
+#     (`status` + profile/signal/lock, `camconfig` + set fields, `export`
+#     + startms/msec/format = create; `export` with only `path` = poll;
+#     `ptz` + button = move/preset; `ptz` with only `camera` = the
+#     bi_get_ptz_status read).
+_ALWAYS_MUTATING_CMDS = frozenset({"trigger", "update"})
+_DUAL_USE_CMD_READ_KEYS: dict[str, frozenset[str]] = {
+    "status": frozenset(),
+    "camconfig": frozenset({"camera"}),
+    "export": frozenset({"path"}),
+    "ptz": frozenset({"camera"}),
+}
+
+
+def _is_mutating_body(cmd: str, body: dict[str, Any]) -> bool:
+    """True if POSTing ``body`` for ``cmd`` writes BI state (see above)."""
+    if cmd in _ALWAYS_MUTATING_CMDS:
+        return True
+    read_keys = _DUAL_USE_CMD_READ_KEYS.get(cmd)
+    if read_keys is None:
+        return False
+    return any(
+        k not in read_keys and k not in _NON_CALLER_BODY_KEYS for k in body
+    )
 
 
 # Terminal `data.status` values: durable end-states, not transient conditions.
@@ -530,8 +564,10 @@ def _classify_fail(resp: dict[str, Any], body: dict[str, Any] | None = None) -> 
     body (tests probing the classifier itself).
 
     The two call sites weigh None differently:
-    - retry decision: None retries (preserves the historical broad-retry
-      behavior for odd/old BI replies; strict tightening risks regressions)
+    - retry decision: None retries a READ cmd (preserves the historical
+      broad-retry behavior for odd/old BI replies) but NOT a mutating one,
+      which raises ``BiError`` instead — a blind re-POST could execute the
+      write twice (audit D7; see `_is_mutating_body`)
     - post-retry exception typing: None raises plain ``BiError`` — claiming
       "auth failed, check credentials" needs an explicit auth-class reason.
     """
@@ -587,6 +623,11 @@ class BiClient:
         self._password = password
         self.session: str | None = None
         self.login_data: dict[str, Any] | None = None
+        # Serialises auth-retry re-logins. Tool calls run concurrently on
+        # `asyncio.to_thread` workers sharing this client, and the old
+        # "blank the token, log in, re-read it" sequence let one call's
+        # retry hand another's re-POST a `session: None` (audit A2).
+        self._relogin_lock = threading.Lock()
 
         self._http = httpx.Client(
             base_url=f"http://{self.host}:{self.port}",
@@ -620,7 +661,11 @@ class BiClient:
         step2 = self._post({"cmd": "login", "session": sess, "response": token})
 
         if step2.get("result") != "success":
-            reason = (step2.get("data") or {}).get("reason", "rejected")
+            data2 = step2.get("data")
+            # A non-dict `data` (BI sent a bare string) is still the reason.
+            reason = (
+                data2.get("reason", "rejected") if isinstance(data2, dict) else (data2 or "rejected")
+            )
             raise BiAuthFailed(f"Blue Iris rejected login: {reason}")
 
         self.session = sess
@@ -654,13 +699,15 @@ class BiClient:
         resp = self._post(body)
         if resp.get("result") != "fail":
             return resp
-        if _classify_fail(resp, body) is False:
+        verdict = _classify_fail(resp, body)
+        if verdict is None and _is_mutating_body(cmd, body):
+            log.debug("cmd=%s unclassifiable fail on a write — not retrying", cmd)
+            raise BiError(f"Blue Iris cmd={cmd} failed: {_fail_reason(resp)}")
+        if verdict is False:
             log.debug("cmd=%s failed (non-auth): %s — not retrying", cmd, _fail_reason(resp))
             raise BiError(f"Blue Iris cmd={cmd} failed: {_fail_reason(resp)}")
         log.info("cmd=%s returned auth-class fail; attempting one session re-login + retry", cmd)
-        self.session = None
-        self.login()
-        body["session"] = self.session
+        body["session"] = self._relogin(body.get("session"))
         resp = self._post(body)
         if resp.get("result") == "fail":
             reason = _fail_reason(resp)
@@ -668,6 +715,20 @@ class BiClient:
                 raise BiAuthFailed(f"Blue Iris cmd={cmd} failed after re-login: {reason}")
             raise BiError(f"Blue Iris cmd={cmd} failed: {reason}")
         return resp
+
+    def _relogin(self, stale: str | None) -> str | None:
+        """Re-login after ``stale`` was rejected; return the token to retry with.
+
+        Under ``_relogin_lock``, and only if the shared token is still the one
+        that failed — if an overlapping call already replaced it, reuse that
+        instead of minting another. The token is never blanked first, so no
+        concurrent reader can pick up ``None``, and the caller retries with
+        the value returned here rather than re-reading the shared field.
+        """
+        with self._relogin_lock:
+            if self.session is None or self.session == stale:
+                self.login()
+            return self.session
 
     def call(self, cmd: str, **payload: Any) -> Any:
         """Call a Blue Iris JSON cmd. Logs in lazily, retries once on session expiry."""
@@ -692,14 +753,21 @@ class BiClient:
         """
         if not self.session:
             self.login()
-        body, ctype, status = self._get_raw(path, {**params, "session": self.session})
+        params_session = self.session
+        body, ctype, status = self._get_raw(path, {**params, "session": params_session})
         if status in (401, 403):
             log.info("GET %s returned %d; re-login + retry", path, status)
-            self.session = None
-            self.login()
-            body, ctype, status = self._get_raw(path, {**params, "session": self.session})
+            fresh = self._relogin(params_session)
+            body, ctype, status = self._get_raw(path, {**params, "session": fresh})
         if status == 404:
             raise BiNotFound(f"Blue Iris HTTP 404 on {path}")
+        if status in (401, 403):
+            # Survived a fresh login, so it's not an expired session.
+            raise BiBadRequest(
+                f"Blue Iris returned HTTP {status} on {path} after re-login: {body[:200]!r}",
+                hint="Blue Iris denied access with a fresh session. The BI user likely "
+                "lacks permission for this camera or resource (Settings > Users).",
+            )
         if status >= 400:
             raise BiBadRequest(f"Blue Iris returned HTTP {status} on {path}: {body[:200]!r}")
         return body, ctype
