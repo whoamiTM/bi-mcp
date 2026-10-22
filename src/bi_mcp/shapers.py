@@ -266,18 +266,6 @@ def shape_alerts(raw: Any, limit: int = 50) -> list[dict[str, Any]]:
     return out[: max(0, int(limit))]
 
 
-def shape_alert_tracks(raw: Any) -> Any:
-    """Shape the `tracks` response — AI object tracks for an alert."""
-    if isinstance(raw, list):
-        return [
-            _drop_empty(_replace_ts(t, ("utc",))) if isinstance(t, dict) else t
-            for t in raw
-        ]
-    if isinstance(raw, dict):
-        return _drop_empty(_replace_ts(raw, ("utc",)))
-    return raw
-
-
 def shape_clip_info(raw: Any) -> dict[str, Any]:
     """Shape the `clipstats` response — forensic detail for one clip/alert.
 

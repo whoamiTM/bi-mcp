@@ -28,7 +28,7 @@ Some example questions you can ask once it's set up:
 >
 > What's the current PTZ preset on the pan-tilt camera?
 
-19 read-only tools register by default. 6 control tools (rename a
+18 read-only tools register by default. 6 control tools (rename a
 camera, switch profile, recall a PTZ preset, export a clip, and a couple
 more) register only when you explicitly opt in by setting
 `BI_MCP_ALLOW_MUTATIONS=1`. The project is MIT-licensed.
@@ -284,7 +284,7 @@ pytest tests/ -q
 
 ## Tool reference
 
-19 read tools register by default. The 6 mutating tools register only when
+18 read tools register by default. The 6 mutating tools register only when
 `BI_MCP_ALLOW_MUTATIONS=1`. Pass `raw=true` on any tool to get the unshaped
 Blue Iris JSON (on `bi_list_alerts`/`bi_list_clips`/`bi_list_log` an explicit
 `limit` still caps the list).
@@ -303,7 +303,6 @@ mutation-safety rules, see [AGENTS.md](AGENTS.md).
 | `bi_get_camera_snapshot` | `GET /image/<short>` | | | Current JPEG frame, returned as an MCP image block (renders inline in image-aware clients) plus base64. Useful for live coverage cross-reference and PTZ preset framing checks. |
 | `bi_get_alert_image` | `alertlist` + `GET /alerts/@<record>` | | | Stored alert image (the saved frame, not a live one), resolved by camera + optional `at` time to the most-recent alert at/before it. Returns an MCP image block (renders inline) plus a metadata text block (record/time/memo) and base64; `markup=true` for the v=2 AI overlay. |
 | `bi_list_alerts` | `alertlist` | | | Recent alerts with AI memo, classification, zones, clip path. |
-| `bi_get_alert_tracks` | `tracks` | | | AI per-frame bounding boxes inside one alert. |
 | `bi_get_clip_info` | `clipstats` | | | Forensic detail for one clip. |
 | `bi_list_clips` | `cliplist` | | | Recorded clip inventory; complementary to `bi_list_alerts`. |
 | `bi_get_timeline` | `timeline` | | | Activity timeline (alert/clip spans) for a camera over a window; defaults to the last 24h. |
@@ -389,7 +388,7 @@ MCP client at a time. It should not be exposed to the internet.
 | Change profile | unchecked | `bi_set_profile` routes through the admin user. |
 | PTZ | **checked** | Needed for `bi_get_ptz_status` and `bi_set_ptz_preset`. |
 | Audio | unchecked | Not used. |
-| Clips | **checked** | Needed for `bi_list_alerts`, `bi_get_clip_info`, `bi_get_alert_tracks`, `bi_get_timeline`, `bi_list_clips`. |
+| Clips | **checked** | Needed for `bi_list_alerts`, `bi_get_clip_info`, `bi_get_timeline`, `bi_list_clips`. |
 | Clip create | **checked** *only* if you enable `bi_export_clip` | Required by the BI `export` cmd. Leave unchecked otherwise. |
 | Camera groups | (tick all you want Claude to see) | |
 

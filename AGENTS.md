@@ -14,7 +14,7 @@ here. Read this first when entering a fresh session.
 - **Tested against:** Blue Iris **5.9.9.71** (x64) on Windows 10.
 - **Mode:** stdio MCP server. Read-only by default; mutating tools register
   only when `BI_MCP_ALLOW_MUTATIONS=1`.
-- **Surface:** 19 read tools (always) + 6 mutating tools (when enabled).
+- **Surface:** 18 read tools (always) + 6 mutating tools (when enabled).
 
 ---
 
@@ -26,7 +26,7 @@ here. Read this first when entering a fresh session.
 | "What cameras are online?" / spotter overview                            | `bi_list_cameras`                                        |
 | "What recent alerts on camera X?"                                        | `bi_list_alerts(camera="...")`                           |
 | "What recorded between A and B?"                                         | `bi_list_clips(camera="...", startdate=…, enddate=…)`    |
-| "Why did this specific alert fire?"                                      | `bi_list_alerts` → `bi_get_alert_tracks` + `bi_get_clip_info` |
+| "Why did this specific alert fire?"                                      | `bi_list_alerts` → `bi_get_clip_info`                    |
 | "Show me trigger zones / AI threshold for camera X"                      | `bi_get_reg(camera="...")` — NOT `bi_get_camera_config`  |
 | "Show me current motion sensitivity / contrast / breaktime"              | `bi_get_camera_motion_config(short="...")` — live, no stale .reg |
 | "What's MQTT/archive/global-schedule state?"                             | `bi_get_sysconfig` (admin required)                      |
@@ -59,7 +59,6 @@ For static facts (camera → IP, role, friendly name), do **not** call
 | `bi_get_camera_snapshot` | `GET /image/<short>` |        |           | Current JPEG frame from a camera, returned as an MCP image block (renders inline) + base64. For live coverage cross-reference + PTZ preset framing checks. |
 | `bi_get_alert_image`    | `alertlist` + `GET /alerts/@<record>` |        |           | STORED alert image (the saved frame), resolved by `camera` + optional `at` time → most-recent alert at/before it. Returns an MCP image block (renders inline) + a text block with record/time/memo + base64. `markup=true` ⇒ v=2 overlay. Use a specific camera, not `Index`. |
 | `bi_list_alerts`        | `alertlist`  |        |           | Recent AI/motion alerts                                        |
-| `bi_get_alert_tracks`   | `tracks`     |        |           | Per-frame bounding boxes for one alert. **BROKEN on 5.9.9.71** — returns `Access denied` from both read-user and admin-user paths; gating mechanism not yet characterized. Uses admin if configured, otherwise read client. |
 | `bi_get_clip_info`      | `clipstats`  |        |           | Forensic clip metadata                                         |
 | `bi_list_clips`         | `cliplist`   |        |           | Recorded clip inventory                                        |
 | `bi_get_timeline`       | `timeline`   |        |           | Activity timeline over a window (alert/clip spans); defaults to last 24h |
@@ -95,9 +94,12 @@ bi_get_clip_info(path=<alerts[i].clip>)
     → resolution, duration, AI/profile/schedule/zones active at trigger time
 ```
 
-`bi_get_alert_tracks(path=<alerts[i].path>)` would be the next step for
-per-frame bounding boxes, but is currently broken on BI 5.9.9.71
-(Access denied, gating undocumented — see tool-inventory note).
+There is no per-frame bounding-box tool. `tracks` is listed among BI's JSON
+cmds but returns `Access denied` even for admin on 5.9.9.71, and UI3 never
+sends it: in UI3's source `tracks` is only a per-alert bitmask in the
+`timeline` reply (which colour tracks the alert draws on). `bi_get_alert_tracks` was
+removed for that reason; don't re-add it. For the AI box on an alert, use
+`bi_get_alert_image(markup=true)`.
 
 `alerts[].offset` is **milliseconds into the parent clip**, not a Unix
 timestamp. Don't ISO-format it.
@@ -515,7 +517,7 @@ durable failures that need a different input or a config fix.
 `bi_<verb>_<noun>`. Canonical verbs:
 
 - `get_` — single object, by id (`bi_get_status`, `bi_get_camera_config`,
-  `bi_get_alert_tracks`)
+  `bi_get_clip_info`)
 - `list_` — collection (`bi_list_cameras`, `bi_list_alerts`,
   `bi_list_clips`, `bi_list_log`)
 - `set_` — mutate state (`bi_set_profile`, `bi_set_ptz_preset`)
