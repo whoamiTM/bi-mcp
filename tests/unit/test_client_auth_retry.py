@@ -999,3 +999,46 @@ def test_get_bytes_persistent_403_hint_points_at_permissions(monkeypatch) -> Non
     assert gets == ["sess1", "sess2"]
     assert "malformed" not in ei.value.hint
     assert "permission" in ei.value.hint.lower()
+
+
+def test_get_bytes_empty_302_relogins_and_retries(monkeypatch) -> None:
+    """Live 2026-10-19: after hours of use every snapshot came back 0 bytes
+    with no content-type. BI 5.9.9.71 answers a stale session on /image/
+    with a 302 to login and an empty body (probed 2026-10-21), which httpx
+    doesn't follow. Treat it like a 401: re-login once and retry."""
+    c = BiClient(host="test", port=81, user="u", password="p")
+    c.session = "sess1"
+    gets = []
+    replies = [(b"", "", 302), (b"\xff\xd8jpeg\xff\xd9", "image/jpeg", 200)]
+
+    def fake_get_raw(self, path, params):
+        gets.append(params["session"])
+        return replies.pop(0)
+
+    monkeypatch.setattr(BiClient, "_get_raw", fake_get_raw)
+    monkeypatch.setattr(BiClient, "_relogin", lambda self, stale: "sess2")
+
+    body, ctype = c.get_bytes("/image/cam1")
+    assert gets == ["sess1", "sess2"]
+    assert body == b"\xff\xd8jpeg\xff\xd9"
+    assert ctype == "image/jpeg"
+
+
+def test_get_bytes_persistent_empty_body_raises(monkeypatch) -> None:
+    """An empty body that survives the re-login must raise, never come back
+    as a successful 0-byte image."""
+    c = BiClient(host="test", port=81, user="u", password="p")
+    c.session = "sess1"
+    gets = []
+
+    def fake_get_raw(self, path, params):
+        gets.append(params["session"])
+        return b"", "", 200
+
+    monkeypatch.setattr(BiClient, "_get_raw", fake_get_raw)
+    monkeypatch.setattr(BiClient, "_relogin", lambda self, stale: "sess2")
+
+    with pytest.raises(BiError) as ei:
+        c.get_bytes("/image/cam1")
+    assert gets == ["sess1", "sess2"]
+    assert "empty" in str(ei.value).lower()

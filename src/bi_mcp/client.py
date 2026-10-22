@@ -749,14 +749,17 @@ class BiClient:
         token attached as a query param. Returns (body_bytes, content_type).
 
         Re-logs in and retries once on 401/403 in case the session expired,
-        matching the auth-retry behavior of ``call()``.
+        matching the auth-retry behavior of ``call()``. An empty sub-400 body
+        is retried the same way: BI answers a stale session on `/image/` with
+        a 302 to the login page and no bytes (httpx doesn't follow it), and
+        an empty image is never valid.
         """
         if not self.session:
             self.login()
         params_session = self.session
         body, ctype, status = self._get_raw(path, {**params, "session": params_session})
-        if status in (401, 403):
-            log.info("GET %s returned %d; re-login + retry", path, status)
+        if status in (401, 403) or (status < 400 and not body):
+            log.info("GET %s returned %d (%d bytes); re-login + retry", path, status, len(body))
             fresh = self._relogin(params_session)
             body, ctype, status = self._get_raw(path, {**params, "session": fresh})
         if status == 404:
@@ -770,6 +773,12 @@ class BiClient:
             )
         if status >= 400:
             raise BiBadRequest(f"Blue Iris returned HTTP {status} on {path}: {body[:200]!r}")
+        if not body:
+            raise BiError(
+                f"Blue Iris returned an empty body (HTTP {status}) on {path} after re-login",
+                hint="Blue Iris sent no image data even with a fresh session. Check the "
+                "BI status window for this camera.",
+            )
         return body, ctype
 
     def _get_raw(self, path: str, params: dict[str, Any]) -> tuple[bytes, str, int]:
