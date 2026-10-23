@@ -1266,7 +1266,7 @@ def _pick_op(args: dict) -> tuple[str, dict[str, Any]]:
     payload: dict[str, Any] = {}
     if op_key == "rename":
         value = args["rename"]
-        if not isinstance(value, str) or not value:
+        if not isinstance(value, str) or not value.strip():
             raise BiBadRequest(
                 f"'rename' must be a non-empty string (got {value!r})"
             )
@@ -1544,6 +1544,11 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
                     previous = raw_pre.get(pre_read_key)
         elif op_name in _VERIFY_VIA_CAMLIST:
             raw_pre = client.admin_call("camlist")
+            if op_name == "rename" and not isinstance(raw_pre, list):
+                raise BiBadRequest(
+                    "bi_set_camera: camlist reply unreadable, so rename can't be "
+                    "checked for a name collision; refusing. Retry later."
+                )
             if isinstance(raw_pre, list):
                 for cam in raw_pre:
                     if isinstance(cam, dict) and cam.get("optionValue") == camera:
@@ -1560,6 +1565,25 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
                         f"bi_set_camera: camera {camera!r} not found in camlist. "
                         "Use bi_list_cameras to verify the short name."
                     )
+                if op_name == "rename":
+                    # BI accepts a duplicate long name, and live (2026-10-22)
+                    # renaming onto another camera's name wiped THAT camera's
+                    # registry key. Refuse before anything is written.
+                    wanted = payload["rename"].strip().casefold()
+                    for cam in raw_pre:
+                        if not isinstance(cam, dict) or cam.get("optionValue") == camera:
+                            continue
+                        names = (cam.get("optionDisplay"), cam.get("optionValue"))
+                        if any(
+                            isinstance(n, str) and n.strip().casefold() == wanted
+                            for n in names
+                        ):
+                            raise BiBadRequest(
+                                f"bi_set_camera: rename {payload['rename']!r} collides "
+                                f"with camera {cam.get('optionValue')!r}. BI accepts "
+                                "duplicate names and doing so destroyed the other "
+                                "camera's config; pick a unique name."
+                            )
         else:
             # reset / reboot — no meaningful "previous" value to capture for
             # revert (you can't un-reset). Pre-read camlist anyway so we know
@@ -1693,8 +1717,7 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
                 verify_mismatch = (
                     f"op={op_name!r} sent {want!r} but post-read "
                     f"camlist shows {new_value!r} after retry. Change may have "
-                    "been silently rejected by BI (e.g. unique-name collision "
-                    "for rename)."
+                    "been silently rejected by BI."
                 )
     elif op_name in _VERIFY_VIA_STREAM_DIP:
         # Capture the pre-write online state for the dip detector. The
@@ -2143,7 +2166,7 @@ def register() -> None:
                 },
                 "rename": {
                     "type": "string",
-                    "description": "Change camera long name. Verified via camlist.optionDisplay; async ~2-3s.",
+                    "description": "Change camera long name. Refused if it matches another camera's long or short name (BI accepts duplicates and that wiped the other camera's config). Verified via camlist.optionDisplay; async ~2-3s.",
                 },
                 "hide": {
                     "type": "boolean",

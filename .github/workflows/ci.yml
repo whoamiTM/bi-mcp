@@ -40,13 +40,13 @@ jobs:
 
     name: py3.12 / mcp ${{ matrix.sdk }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The project declares requires-python >=3.10, but 3.12 is what the
       # local venv runs and what this suite is soaked against. The SDK axis
       # is the point of this workflow, so the Python axis stays fixed at one
       # version rather than multiplying legs for no measured risk.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 

@@ -302,10 +302,17 @@ When `verified=false`, look at `verify_error_kind`:
 - `verify_mismatch` — the post-read shows a value other than the one sent.
   `bi_set_profile` returns it on a profile mismatch or an unchanged `lock`
   after `-1` (a second `-1` toggles again). `bi_set_camera` returns it for
-  any post-read mismatch (profile, lock, op value, rename collision) and for
+  any post-read mismatch (profile, lock, op value) and for
   a `reset` with no stream dip, with `previous` intact. For `lock=false`
   coerced to BI's sticky `lock=2` or `profile=-1` coerced to the global, the
   `verify_error` text names the way out: enable=false, then enable=true.
+
+**`bi_set_camera` rename refuses collisions.** A new name matching another
+camera's long or short name (case and surrounding whitespace ignored) is
+refused before anything is sent, as is a rename when camlist can't be read.
+Blue Iris accepts duplicate names, and renaming onto another camera's name,
+even briefly, wiped that camera's config on a live install. Never rename a
+camera "to test" on a production NVR.
 
 ### Rule 3 — Revert global state before turn end
 
@@ -323,6 +330,14 @@ bi_set_profile(profile=2)
 bi_set_profile(profile=prev_profile)
 # if you also toggled hold via profile=-1 mid-flow, revert that with another -1
 ```
+
+**This does not restore a hold.** Switching profile from hold (`lock` 1)
+leaves BI on temporary (`lock` 2), and the revert call does too. Only
+re-sending the same profile engages hold, which the tool refuses. If
+`previous_lock` was 1 (hold), say so and ask the user to re-engage hold in
+UI3; don't report the revert as complete. Whether `-1` from temporary
+re-engages hold is unverified, so don't rely on it. Prefer not flipping a
+held profile at all.
 
 `bi_set_profile` accepts:
 - Profile number `0-7` — switch to that profile (requires it to differ from

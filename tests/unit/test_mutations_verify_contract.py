@@ -207,3 +207,50 @@ def test_set_camera_reset_without_dip_reported_not_raised() -> None:
     assert out["ok"] is True
     assert out["verified"] is False
     assert out["verify_error_kind"] == "verify_mismatch"
+
+
+@pytest.mark.parametrize(
+    "new_name",
+    ["Other", "other ", "Y", "y"],
+    ids=["display", "display-case-space", "short", "short-case"],
+)
+def test_set_camera_rename_collision_refused_before_write(new_name) -> None:
+    # Live 2026-10-22: BI accepted a rename onto another camera's name and
+    # that camera's registry key was wiped. Refuse before anything is sent.
+    rows = [
+        {"optionValue": "X", "optionDisplay": "Mine"},
+        {"optionValue": "Y", "optionDisplay": "Other"},
+    ]
+    st = _Stub(pre=rows, post=rows)
+    with pytest.raises(BiBadRequest, match="collides"):
+        tm._tool_set_camera(st, {"camera": "X", "rename": new_name})
+    assert st.writes == []
+
+
+def test_set_camera_rename_to_own_short_name_allowed() -> None:
+    rows = [
+        {"optionValue": "X", "optionDisplay": "Mine"},
+        {"optionValue": "Y", "optionDisplay": "Other"},
+    ]
+    post = [{"optionValue": "X", "optionDisplay": "X"}, rows[1]]
+    st = _Stub(pre=rows, post=post)
+    out = tm._tool_set_camera(st, {"camera": "X", "rename": "X"})
+    assert len(st.writes) == 1
+    assert out["ok"] is True
+
+
+@pytest.mark.parametrize("pre", [None, {"bad": 1}], ids=["none", "dict"])
+def test_set_camera_rename_refused_when_camlist_unreadable(pre) -> None:
+    # The collision check needs the camera list; without it, refuse (fail closed).
+    st = _Stub(pre=pre, post=pre)
+    with pytest.raises(BiBadRequest):
+        tm._tool_set_camera(st, {"camera": "X", "rename": "Other"})
+    assert st.writes == []
+
+
+def test_set_camera_rename_blank_refused() -> None:
+    rows = [{"optionValue": "X", "optionDisplay": "Mine"}]
+    st = _Stub(pre=rows, post=rows)
+    with pytest.raises(BiBadRequest):
+        tm._tool_set_camera(st, {"camera": "X", "rename": "   "})
+    assert st.writes == []
