@@ -8,7 +8,7 @@ from typing import Any
 
 from .. import shapers
 from ..client import BiClients
-from ..errors import BiAdminRequired
+from ..errors import BiAdminRequired, BiBadRequest
 from ..utils.logging import log_tool_usage
 from ..utils.time import parse_since
 from .registry import register_tool
@@ -77,7 +77,12 @@ def _tool_list_log(client: BiClients, args: dict) -> Any:
             raise ValueError(f"regex did not compile: {e}") from e
 
     match: str | None = args.get("match")
-    limit = int(args.get("limit", 100))
+    # limit: null/absent = default; a non-integer is a caller error.
+    limit_arg = args.get("limit")
+    try:
+        limit = 100 if limit_arg is None else int(limit_arg)
+    except (TypeError, ValueError) as e:
+        raise BiBadRequest(f"limit must be an integer (got {limit_arg!r})") from e
 
     if client.resolve_admin() is None:
         raise BiAdminRequired(
@@ -88,6 +93,10 @@ def _tool_list_log(client: BiClients, args: dict) -> Any:
 
     raw = client.admin_call("log", **payload)
     if args.get("raw"):
+        # An explicit limit still caps a raw list (entries stay verbatim;
+        # filters are not applied on the raw path).
+        if args.get("limit") is not None and isinstance(raw, list):
+            return raw[: max(0, limit)]
         return raw
 
     shaped = shapers.shape_log(raw, limit=10_000_000)
@@ -191,7 +200,7 @@ def register() -> None:
                     "type": "string",
                     "description": "Python regex on entry.msg (IGNORECASE). XOR with match.",
                 },
-                "limit": {"type": "integer", "description": "Max entries (default 100)."},
+                "limit": {"type": "integer", "description": "Max entries (default 100). An explicit limit also caps raw=true output."},
             },
             "additionalProperties": True,
         },

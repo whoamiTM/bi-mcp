@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from bi_mcp.errors import BiBadRequest
+from bi_mcp.errors import BiBadRequest, BiError
 from bi_mcp.tools import tools_explain_alert
 from bi_mcp.tools.tools_explain_alert import _tool_explain_alert_chain
 
@@ -108,4 +108,56 @@ def test_unlisted_clip_is_rejected(record: dict[str, Any]) -> None:
     with pytest.raises(BiBadRequest, match="clip-level record"):
         _tool_explain_alert_chain(
             _StubClient(record, listed=False), {"camera": "SecCam_12", "path": record["path"]}  # type: ignore[arg-type]
+        )
+
+
+class _ListedAsClient(_StubClient):
+    """alertlist returns a canned payload instead of a list built from the record."""
+
+    def __init__(self, clipstats: dict[str, Any], alertlist_reply: Any) -> None:
+        super().__init__(clipstats, listed=False)
+        self._reply = alertlist_reply
+
+    def call(self, cmd: str, **payload: Any) -> Any:
+        if cmd == "alertlist":
+            self.alertlist_calls.append(payload)
+            return self._reply
+        return super().call(cmd, **payload)
+
+
+def test_still_alert_passes_with_extensionless_path() -> None:
+    # clipstats accepts '@<digits>' and replies with the canonical
+    # '@<digits>.jpg' path (live-verified 2026-10-19); alertlist lists the
+    # canonical form, so membership must compare against clipstats' path.
+    client = _StubClient(_JPG_STILL_ALERT, listed=True)
+    with pytest.raises(_PastGuard):
+        _tool_explain_alert_chain(
+            client, {"camera": "SecCam_12", "path": "@12856749679"}  # type: ignore[arg-type]
+        )
+
+
+def test_missing_date_reports_epoch_error_not_clip_error() -> None:
+    record = {k: v for k, v in _JPG_STILL_ALERT.items() if k != "date"}
+    with pytest.raises(BiBadRequest, match="alert epoch"):
+        _tool_explain_alert_chain(
+            _StubClient(record, listed=True), {"camera": "SecCam_12", "path": record["path"]}  # type: ignore[arg-type]
+        )
+
+
+def test_non_list_alertlist_reply_is_surfaced() -> None:
+    client = _ListedAsClient(_JPG_STILL_ALERT, {"unexpected": 1})
+    with pytest.raises(BiError, match="unexpected payload"):
+        _tool_explain_alert_chain(
+            client, {"camera": "SecCam_12", "path": _JPG_STILL_ALERT["path"]}  # type: ignore[arg-type]
+        )
+
+
+def test_bvr_alert_with_parent_clip_path_in_clipstats_passes() -> None:
+    # For a BVR-backed alert clipstats replies with the PARENT clip's path
+    # (live-verified on SecCam_3), so the caller's own path must also count.
+    record = {**_JPG_STILL_ALERT, "path": "@12854262184.bvr"}  # parent clip id
+    client = _ListedAsClient(record, [{"path": "@12854272515.bvr", "clip": "@12854262184.bvr"}])
+    with pytest.raises(_PastGuard):
+        _tool_explain_alert_chain(
+            client, {"camera": "SecCam_12", "path": "@12854272515.bvr"}  # type: ignore[arg-type]
         )

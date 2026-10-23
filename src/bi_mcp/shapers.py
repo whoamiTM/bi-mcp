@@ -81,7 +81,9 @@ def shape_status(raw: Any, profiles: list[str] | None = None) -> dict[str, Any]:
     """
     if not isinstance(raw, dict):
         return {"raw": raw}
-    out = _replace_ts(raw, ("warnings", "lastupdate"))
+    # `warnings` is a count ("current number of warnings in Messages"), not
+    # an epoch — never ISO-ify it.
+    out = _replace_ts(raw, ("lastupdate",))
     profile = raw.get("profile")
     if (
         isinstance(profiles, list)
@@ -95,6 +97,18 @@ def shape_status(raw: Any, profiles: list[str] | None = None) -> dict[str, Any]:
 
 _STALE_WHEN_DISABLED_KEYS = ("nAlerts", "nTriggers", "nClips", "nNoSignal", "ManRecElapsed")
 
+# camlist epoch fields. BI 5.9.9.71 sends `alertutc` (UTC seconds); the
+# manual's `lastalertutc`/`newalertsutc` names are kept for other builds.
+_CAMLIST_TS_KEYS = ("alertutc", "lastalertutc", "newalertsutc")
+
+
+def _drop_empty_camlist(cam: dict[str, Any]) -> dict[str, Any]:
+    """`_drop_empty`, but keep `error: ""` — BI's "camera OK" value."""
+    out = _drop_empty(cam)
+    if cam.get("error") == "":
+        out["error"] = ""
+    return out
+
 
 def shape_camlist(raw: Any, limit: int | None = None) -> list[dict[str, Any]]:
     """Shape the `camlist` response — array of cameras.
@@ -107,7 +121,7 @@ def shape_camlist(raw: Any, limit: int | None = None) -> list[dict[str, Any]]:
         ``>= nAlerts`` because the two reset on different cadences
         (``nAlerts`` only when stats are reset; ``newalerts`` as the user
         clears the badge in the UI).
-      * ``ManRecElapsed`` — seconds elapsed in the current manual-record
+      * ``ManRecElapsed`` — msec elapsed in the current manual-record
         session; frozen on disable.
 
     For disabled cameras (``isEnabled == False``), the four ``n*`` counters
@@ -121,7 +135,7 @@ def shape_camlist(raw: Any, limit: int | None = None) -> list[dict[str, Any]]:
     for cam in raw:
         if not isinstance(cam, dict):
             continue
-        shaped = _replace_ts(cam, ("lastalertutc", "newalertsutc"))
+        shaped = _replace_ts(cam, _CAMLIST_TS_KEYS)
         if shaped.get("isEnabled") is False:
             stale = {
                 k: shaped[k] for k in _STALE_WHEN_DISABLED_KEYS if k in shaped
@@ -130,7 +144,7 @@ def shape_camlist(raw: Any, limit: int | None = None) -> list[dict[str, Any]]:
                 for k in stale:
                     del shaped[k]
                 shaped["stale_when_disabled"] = stale
-        out.append(_drop_empty(shaped))
+        out.append(_drop_empty_camlist(shaped))
     if limit is not None:
         out = out[: max(0, int(limit))]
     return out
@@ -210,7 +224,7 @@ def shape_camera_config(raw: Any, short_name: str) -> dict[str, Any] | None:
             or cam.get("shortName") == short_name
             or cam.get("name") == short_name
         ):
-            return _drop_empty(_replace_ts(cam, ("lastalertutc", "newalertsutc")))
+            return _drop_empty_camlist(_replace_ts(cam, _CAMLIST_TS_KEYS))
     return None
 
 
@@ -250,18 +264,6 @@ def shape_alerts(raw: Any, limit: int = 50) -> list[dict[str, Any]]:
             continue
         out.append(_drop_empty(_replace_ts(a, ("utc", "date"))))
     return out[: max(0, int(limit))]
-
-
-def shape_alert_tracks(raw: Any) -> Any:
-    """Shape the `tracks` response — AI object tracks for an alert."""
-    if isinstance(raw, list):
-        return [
-            _drop_empty(_replace_ts(t, ("utc",))) if isinstance(t, dict) else t
-            for t in raw
-        ]
-    if isinstance(raw, dict):
-        return _drop_empty(_replace_ts(raw, ("utc",)))
-    return raw
 
 
 def shape_clip_info(raw: Any) -> dict[str, Any]:
@@ -557,8 +559,18 @@ def shape_export_result(raw: Any) -> dict[str, Any]:
         return out
     if isinstance(data, list):
         out["items"] = [_shape_export_item(it) for it in data if isinstance(it, dict)]
-    elif isinstance(data, dict):
-        out["item"] = _shape_export_item(data)
+        return out
+    # Envelope keys aren't item fields: a success reply with nothing else
+    # (``{}``, ``{result:"success"}``, ``data: null``/``{}``) carries no
+    # export item and must not read as ok.
+    item = (
+        {k: v for k, v in data.items() if k not in ("result", "session")}
+        if isinstance(data, dict)
+        else {}
+    )
+    if not item:
+        return {"ok": False, "reason": "Blue Iris returned no export item"}
+    out["item"] = _shape_export_item(item)
     return out
 
 

@@ -89,17 +89,21 @@ _COMPOUND_RE = re.compile(
 )
 
 
-def _parse_memo_objects(memo: str | None) -> dict[str, int]:
+def _parse_memo_objects(memo: str | None) -> dict[str, int | None]:
     """Parse a BI alert memo into {object_name_lower: confidence_pct}.
 
-    BI memos look like ``"person:73%,car:65%"`` or ``"car:71%"``. The
-    confidences are integer percentages; we strip the % and return a
-    dict for fast lookup by the comparator.
+    BI memos look like ``"person:73%,car:65%"`` or ``"car:71%"``. Memos
+    from different sources are joined with ``;`` (``"person:62%;occupied"``,
+    ``"preset_2;car:80%"``), so both separators split terms. Tokens with no
+    ``:N%`` (``occupied``, ``preset_2`` — IVS/ONVIF source names) map to
+    ``None``: present, but carrying no confidence. A
+    duplicate object keeps its highest confidence: each source scored the
+    object independently, and BI's threshold passes if any detection meets it.
     """
     if not memo or not isinstance(memo, str):
         return {}
-    out: dict[str, int] = {}
-    for chunk in memo.split(","):
+    out: dict[str, int | None] = {}
+    for chunk in re.split(r"[,;]", memo):
         chunk = chunk.strip()
         if not chunk:
             continue
@@ -109,15 +113,16 @@ def _parse_memo_objects(memo: str | None) -> dict[str, int]:
                 pct = int(conf.rstrip("%").strip())
             except ValueError:
                 pct = 0
-            out[name.strip().lower()] = pct
+            key = name.strip().lower()
+            out[key] = max(pct, out.get(key) or 0)
         else:
-            out[chunk.lower()] = 0
+            out.setdefault(chunk.lower(), None)
     return out
 
 
 def _evaluate_compound_predicate(
     pred: str,
-    memo_objects: dict[str, int],
+    memo_objects: dict[str, int | None],
     active_preset: int | None,
 ) -> dict[str, Any]:
     """Evaluate one compound predicate term against the alert.
@@ -165,12 +170,13 @@ def _evaluate_compound_predicate(
         else:
             obj = term.lower()
             present = obj in memo_objects
-            confidence = memo_objects.get(obj, 0)
             comp: dict[str, Any] = {
                 "term": term,
                 "kind": "ai_object",
                 "present_in_memo": present,
-                "memo_confidence_pct": confidence if present else None,
+                # None for a confidence-less token (preset_N, occupied):
+                # it can't count toward the threshold's minimum.
+                "memo_confidence_pct": memo_objects.get(obj),
                 "matched": present,
             }
             components.append(comp)
@@ -206,6 +212,16 @@ def _evaluate_compound_predicate(
                 )
             else:
                 result["matched"] = True
+        elif all_matched and any(c["kind"] == "ai_object" for c in components):
+            # Every term is present but none carries a confidence: whether
+            # BI's threshold passes a confidence-less source is undocumented,
+            # so report undetermined rather than guess either way.
+            result["threshold_pct"] = threshold
+            result["matched"] = None
+            result["reason"] = (
+                "all terms present but none carries a confidence; threshold "
+                "not evaluable"
+            )
         else:
             result["matched"] = all_matched
             if not all_matched:
@@ -224,7 +240,7 @@ def _evaluate_compound_predicate(
 def _evaluate_object_filter(
     filter_name: str,
     raw_value: str | None,
-    memo_objects: dict[str, int],
+    memo_objects: dict[str, int | None],
     active_preset: int | None,
 ) -> dict[str, Any] | None:
     """For trig_object / trig_skip — break the comma-list into terms and
@@ -598,9 +614,16 @@ def _build_alert_facts(
     }
 
 
-def _has_retrigger(log_entries: list[dict[str, Any]], camera: str) -> bool:
-    """Did a 'Retriggered' line for this camera appear in the log window?"""
+def _has_retrigger(log_entries: list[dict[str, Any]], camera: str, alert_ts: int) -> bool:
+    """Did a 'Retriggered' line for this camera appear after the alert?
+
+    The window opens before the alert, so an earlier alert's retrigger
+    must not count for this one.
+    """
     for e in log_entries:
+        d = e.get("_epoch")
+        if not isinstance(d, (int, float)) or d <= alert_ts:
+            continue
         if e.get("obj") == camera and str(e.get("msg", "")).startswith("Retriggered"):
             return True
     return False
@@ -693,19 +716,31 @@ def _tool_explain_alert_chain(client: BiClients, args: dict) -> Any:
     # display name, which users can rename. The bi_list_alerts response
     # shape exposes ``path`` (alert id) and ``clip`` (parent clip id); the
     # alert path is what's wanted.
+    raw_date = clip_raw.get("date") if isinstance(clip_raw, dict) else None
+    if not isinstance(raw_date, (int, float)):
+        raise BiBadRequest(
+            "bi_explain_alert_chain: couldn't determine alert epoch from "
+            "clipstats response. Pass a more recent alert path."
+        )
     is_alert = bool(clip_info.get("alertmsec") or clip_info.get("memo"))
     if not is_alert:
-        raw_date = clip_raw.get("date") if isinstance(clip_raw, dict) else None
-        if isinstance(raw_date, (int, float)):
-            listed = client.call(
-                "alertlist",
-                camera=camera,
-                startdate=int(raw_date) - 1,
-                enddate=int(raw_date) + 1,
+        listed = client.call(
+            "alertlist",
+            camera=camera,
+            startdate=int(raw_date) - 1,
+            enddate=int(raw_date) + 1,
+        )
+        if not isinstance(listed, list):
+            raise BiError(
+                f"alertlist for {camera} returned an unexpected payload: {listed!r}"
             )
-            is_alert = isinstance(listed, list) and any(
-                isinstance(a, dict) and a.get("path") == path for a in listed
-            )
+        # Match the caller's path OR clipstats' reply path: for a still
+        # clipstats accepts '@<digits>' and replies '@<digits>.jpg', but for
+        # a BVR-backed alert it replies with the PARENT clip's path.
+        wanted = {path, clip_info.get("path")} - {None}
+        is_alert = any(
+            isinstance(a, dict) and a.get("path") in wanted for a in listed
+        )
     if not is_alert:
         raise BiBadRequest(
             f"bi_explain_alert_chain: path {path!r} resolved to a clip-"
@@ -835,7 +870,7 @@ def _tool_explain_alert_chain(client: BiClients, args: dict) -> Any:
             )
 
     zone_events = _extract_zone_events(log_window, camera)
-    retrigger_in_window = _has_retrigger(log_window, camera)
+    retrigger_in_window = _has_retrigger(log_window, camera, int(alert_ts))
     alert_ended = _alert_appears_ended(log_window, camera, int(alert_ts))
 
     # Strip the internal _epoch helper from anything we'd surface (not

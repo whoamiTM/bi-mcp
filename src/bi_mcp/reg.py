@@ -114,7 +114,12 @@ def _parse_hive(path: Path, key_path: str | None) -> dict[str, dict[str, Any]]:
     root = r.root()
     if key_path:
         key = root.find_key(key_path)
-        return _walk(key, prefix=key_path)
+        # `find_key` is case-insensitive and tolerates a trailing backslash,
+        # so echo the hive's CANONICAL path (relative to the root, as the
+        # full-hive branch below does), never the caller's spelling — the
+        # shaper's annotators match page names exactly (audit A1).
+        canonical = key.path()[len(root.path()) + 1:]
+        return _walk(key, prefix=canonical)
     # Share one budget across every top-level subtree — otherwise a hive
     # with many top-level subkeys could do N×_MAX_HIVE_KEYS work before
     # the guard trips.

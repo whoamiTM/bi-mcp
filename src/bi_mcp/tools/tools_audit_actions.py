@@ -365,7 +365,26 @@ def _audit(
             if modal_count <= len(consistent_values) // 2:
                 # No >50% majority among consistent voters; can't call
                 # any side an outlier — but inconsistent cameras still
-                # warrant a finding if any.
+                # warrant a finding if any. The split itself is still
+                # reported (as a "no majority" entry listing each value's
+                # members) so a 2-2 divergence doesn't vanish silently.
+                groups: dict[Any, dict[str, Any]] = {}
+                for short, val in votes:
+                    if val is _INCONSISTENT:
+                        continue
+                    g = groups.setdefault(_freeze(val), {"value": val, "members": []})
+                    for h, row, _ in per_camera[short]:
+                        g["members"].append(f"{short}#{row['index']}@{h}")
+                split_entry = {
+                    "field": path,
+                    "no_majority": True,
+                    "majority_total": len(consistent_values),
+                    "values": list(groups.values()),
+                }
+                if path == "enabled":
+                    disabled_outliers.append(split_entry)
+                else:
+                    outlier_findings.append(split_entry)
                 if inconsistent_cams:
                     intra_camera_inconsistency.append(
                         {"field": path, "cameras": inconsistent_cams}
@@ -592,7 +611,9 @@ def register() -> None:
             "buckets action rows into cohorts by (type, description, "
             "type-specific key), and reports fields where one camera's "
             "value deviates from the cohort's modal value under "
-            "'outliers'. Per-camera path tokens (e.g. 'ai/SecCam_3/"
+            "'outliers'; fields with no strict majority appear there as "
+            "entries with no_majority=true listing each value and its "
+            "members. Per-camera path tokens (e.g. 'ai/SecCam_3/"
             "motion') are templated to '<CAM>' before comparison so "
             "legitimate per-camera substitution doesn't false-positive. "
             "The 'enabled' field is reported separately under "

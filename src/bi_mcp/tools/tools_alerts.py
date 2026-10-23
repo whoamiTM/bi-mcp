@@ -1,4 +1,4 @@
-"""Alert + alert-tracks + clip-info tools — the alert investigation chain."""
+"""Alert + clip-info tools — the alert investigation chain."""
 
 from __future__ import annotations
 
@@ -32,26 +32,19 @@ def _tool_list_alerts(client: BiClients, args: dict) -> Any:
                 payload[k] = parse_since(args[k], arg_name=k)
             except ValueError as e:
                 raise BiBadRequest(str(e)) from e
+    # limit: null/absent = default; a non-integer is a caller error.
+    limit_arg = args.get("limit")
+    try:
+        limit = 50 if limit_arg is None else int(limit_arg)
+    except (TypeError, ValueError) as e:
+        raise BiBadRequest(f"limit must be an integer (got {limit_arg!r})") from e
     raw = client.call("alertlist", **payload)
     if args.get("raw"):
+        # An explicit limit still caps a raw list (entries stay verbatim).
+        if args.get("limit") is not None and isinstance(raw, list):
+            return raw[: max(0, limit)]
         return raw
-    return shapers.shape_alerts(raw, limit=int(args.get("limit", 50)))
-
-
-@log_tool_usage("bi_get_alert_tracks")
-def _tool_get_alert_tracks(client: BiClients, args: dict) -> Any:
-    path = args.get("path") or args.get("alert")
-    if not path:
-        raise BiBadRequest(
-            "bi_get_alert_tracks requires a 'path' argument (the alert path/identifier)"
-        )
-    if client.resolve_admin() is not None:
-        raw = client.admin_call("tracks", path=path)
-    else:
-        raw = client.call("tracks", path=path)
-    if args.get("raw"):
-        return raw
-    return shapers.shape_alert_tracks(raw)
+    return shapers.shape_alerts(raw, limit=limit)
 
 
 @log_tool_usage("bi_get_clip_info")
@@ -118,40 +111,12 @@ def register() -> None:
                     ),
                 },
                 "search": {"type": "string", "description": "Memo substring filter (server-side)."},
-                "limit": {"type": "integer", "description": "Max alerts (default 50)."},
+                "limit": {"type": "integer", "description": "Max alerts (default 50). An explicit limit also caps raw=true output."},
             },
             "required": ["camera"],
             "additionalProperties": True,
         },
         annotations={"readOnlyHint": True, "title": "List BI alerts"},
-    )
-
-    register_tool(
-        "bi_get_alert_tracks",
-        _tool_get_alert_tracks,
-        description=(
-            "AI object tracks (per-frame bounding boxes) inside one alert. Pass the "
-            "alert's 'path' from bi_list_alerts. "
-            "**KNOWN BROKEN on BI 5.9.9.71**: returns 'Access denied' from both the "
-            "read-user and admin-user paths. The `tracks` cmd appears in BI's JSON "
-            "cmd list but the manual provides no spec for it, and its gating "
-            "mechanism is undocumented. Uses admin if configured (in case a future "
-            "build accepts it), otherwise uses the read client. Do not rely on "
-            "this tool until the gating is characterized."
-        ),
-        schema={
-            "type": "object",
-            "properties": {
-                **COMMON_SCHEMA,
-                "path": {
-                    "type": "string",
-                    "description": "Alert path/identifier from bi_list_alerts.",
-                },
-            },
-            "required": ["path"],
-            "additionalProperties": True,
-        },
-        annotations={"readOnlyHint": True, "title": "Get BI alert tracks"},
     )
 
     register_tool(

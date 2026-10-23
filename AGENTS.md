@@ -14,7 +14,7 @@ here. Read this first when entering a fresh session.
 - **Tested against:** Blue Iris **5.9.9.71** (x64) on Windows 10.
 - **Mode:** stdio MCP server. Read-only by default; mutating tools register
   only when `BI_MCP_ALLOW_MUTATIONS=1`.
-- **Surface:** 19 read tools (always) + 6 mutating tools (when enabled).
+- **Surface:** 18 read tools (always) + 6 mutating tools (when enabled).
 
 ---
 
@@ -26,7 +26,7 @@ here. Read this first when entering a fresh session.
 | "What cameras are online?" / spotter overview                            | `bi_list_cameras`                                        |
 | "What recent alerts on camera X?"                                        | `bi_list_alerts(camera="...")`                           |
 | "What recorded between A and B?"                                         | `bi_list_clips(camera="...", startdate=…, enddate=…)`    |
-| "Why did this specific alert fire?"                                      | `bi_list_alerts` → `bi_get_alert_tracks` + `bi_get_clip_info` |
+| "Why did this specific alert fire?"                                      | `bi_list_alerts` → `bi_get_clip_info`                    |
 | "Show me trigger zones / AI threshold for camera X"                      | `bi_get_reg(camera="...")` — NOT `bi_get_camera_config`  |
 | "Show me current motion sensitivity / contrast / breaktime"              | `bi_get_camera_motion_config(short="...")` — live, no stale .reg |
 | "What's MQTT/archive/global-schedule state?"                             | `bi_get_sysconfig` (admin required)                      |
@@ -59,7 +59,6 @@ For static facts (camera → IP, role, friendly name), do **not** call
 | `bi_get_camera_snapshot` | `GET /image/<short>` |        |           | Current JPEG frame from a camera, returned as an MCP image block (renders inline) + base64. For live coverage cross-reference + PTZ preset framing checks. |
 | `bi_get_alert_image`    | `alertlist` + `GET /alerts/@<record>` |        |           | STORED alert image (the saved frame), resolved by `camera` + optional `at` time → most-recent alert at/before it. Returns an MCP image block (renders inline) + a text block with record/time/memo + base64. `markup=true` ⇒ v=2 overlay. Use a specific camera, not `Index`. |
 | `bi_list_alerts`        | `alertlist`  |        |           | Recent AI/motion alerts                                        |
-| `bi_get_alert_tracks`   | `tracks`     |        |           | Per-frame bounding boxes for one alert. **BROKEN on 5.9.9.71** — returns `Access denied` from both read-user and admin-user paths; gating mechanism not yet characterized. Uses admin if configured, otherwise read client. |
 | `bi_get_clip_info`      | `clipstats`  |        |           | Forensic clip metadata                                         |
 | `bi_list_clips`         | `cliplist`   |        |           | Recorded clip inventory                                        |
 | `bi_get_timeline`       | `timeline`   |        |           | Activity timeline over a window (alert/clip spans); defaults to last 24h |
@@ -67,7 +66,7 @@ For static facts (camera → IP, role, friendly name), do **not** call
 | `bi_list_log`           | `log`        |   ✓    |           | System log entries with filters (since/camera/obj/levels/match/regex). Returns {entries, scanned, matched, warning?} |
 | `bi_get_reg`            | (file)       |        |           | .reg hive parse — for what the API can't reach                 |
 | `bi_get_actionset`      | (file)       |        |           | Semantic view of Alerts\\OnTrigger / OnReset (decoded)         |
-| `bi_audit_actions`      | (file)       |        |           | Cross-camera cohort-divergence report — buckets action rows by (type, description, type-specific key) and surfaces fields where one row's value deviates from the cohort majority as `outliers`. **Informational only** — outliers may be intentional per-camera customizations; present findings for user review, not as bugs to fix. Templates per-camera tokens (`ai/<CAM>/motion`) before comparison. Re-surfaces raw `trig_object`/`trig_skip` to catch case-sensitivity differences the shaper would otherwise normalize away. |
+| `bi_audit_actions`      | (file)       |        |           | Cross-camera cohort-divergence report — buckets action rows by (type, description, type-specific key) and surfaces fields where one row's value deviates from the cohort majority as `outliers`; fields with no strict majority appear in `outliers` (in `disabled_outliers` for the `enabled` field) as entries with `no_majority: true` listing each value and its members. **Informational only** — outliers may be intentional per-camera customizations; present findings for user review, not as bugs to fix. Templates per-camera tokens (`ai/<CAM>/motion`) before comparison. Re-surfaces raw `trig_object`/`trig_skip` to catch case-sensitivity differences the shaper would otherwise normalize away. |
 | `bi_trigger_camera`     | `trigger`    |   ✓    |     ✓     | Fire a synthetic motion trigger                                |
 | `bi_set_ptz_preset`     | `ptz` (cmd)  |        |     ✓     | Recall a PTZ preset (1-20)                                     |
 | `bi_set_profile`        | `status` set |   ✓    |     ✓     | Switch active profile                                          |
@@ -78,7 +77,9 @@ For static facts (camera → IP, role, friendly name), do **not** call
 Every tool accepts `raw=true` — returns the underlying BI payload verbatim
 instead of the shaped view. Use it when shaping might be hiding a field
 you need, or when a future BI build's response shape doesn't match the
-shaper.
+shaper. On `bi_list_alerts`/`bi_list_clips`/`bi_list_log` an explicit
+`limit` still caps the raw list (entries stay verbatim; `bi_list_log`'s raw
+path skips the filters).
 
 ---
 
@@ -93,9 +94,12 @@ bi_get_clip_info(path=<alerts[i].clip>)
     → resolution, duration, AI/profile/schedule/zones active at trigger time
 ```
 
-`bi_get_alert_tracks(path=<alerts[i].path>)` would be the next step for
-per-frame bounding boxes, but is currently broken on BI 5.9.9.71
-(Access denied, gating undocumented — see tool-inventory note).
+There is no per-frame bounding-box tool. `tracks` is listed among BI's JSON
+cmds but returns `Access denied` even for admin on 5.9.9.71, and UI3 never
+sends it: in UI3's source `tracks` is only a per-alert bitmask in the
+`timeline` reply (which colour tracks the alert draws on). `bi_get_alert_tracks` was
+removed for that reason; don't re-add it. For the AI box on an alert, use
+`bi_get_alert_image(markup=true)`.
 
 `alerts[].offset` is **milliseconds into the parent clip**, not a Unix
 timestamp. Don't ISO-format it.
@@ -279,9 +283,9 @@ bi_list_alerts(camera="SecCam_3", limit=1)  → memo should appear
 
 | `ok`  | `verified` | Meaning | Action |
 |-------|------------|---------|--------|
-| true  | true       | BI accepted AND post-read confirmed the change | Done |
+| true  | true       | `reset`/`reboot` only: BI accepted AND the stream dip was observed | Done |
 | true  | false      | BI accepted but post-read couldn't confirm (verify-side blip, or stream-dip not seen for reboot/reset) | Re-read state manually; do NOT blindly retry — some ops are not idempotent (`pause` is additive, `reboot`/`reset` are disruptive) |
-| true  | omitted    | BI accepted; this op verifies via the response itself (no post-read needed) | Done |
+| true  | omitted    | All other ops: BI accepted AND the camconfig/camlist post-read confirmed the change | Done |
 | false | —          | BI rejected the write | Read `reason` and decide |
 
 When `verified=false`, look at `verify_error_kind`:
@@ -292,6 +296,23 @@ When `verified=false`, look at `verify_error_kind`:
 - `verify_unreachable` — network blip / BI restart. Almost always
   transient; one retry is usually fine, but still re-read first to avoid
   duplicating non-idempotent side effects.
+- `verify_error` — the verify read failed some other way (HTTP 5xx,
+  non-JSON, 404) after the write was accepted. Both `bi_set_camera` and
+  `bi_set_profile` return it. Re-read before retrying.
+- `verify_mismatch` — the post-read shows a value other than the one sent.
+  `bi_set_profile` returns it on a profile mismatch or an unchanged `lock`
+  after `-1` (a second `-1` toggles again). `bi_set_camera` returns it for
+  any post-read mismatch (profile, lock, op value) and for
+  a `reset` with no stream dip, with `previous` intact. For `lock=false`
+  coerced to BI's sticky `lock=2` or `profile=-1` coerced to the global, the
+  `verify_error` text names the way out: enable=false, then enable=true.
+
+**`bi_set_camera` rename refuses collisions.** A new name matching another
+camera's long or short name (case and surrounding whitespace ignored) is
+refused before anything is sent, as is a rename when camlist can't be read.
+Blue Iris accepts duplicate names, and renaming onto another camera's name,
+even briefly, wiped that camera's config on a live install. Never rename a
+camera "to test" on a production NVR.
 
 ### Rule 3 — Revert global state before turn end
 
@@ -310,6 +331,14 @@ bi_set_profile(profile=prev_profile)
 # if you also toggled hold via profile=-1 mid-flow, revert that with another -1
 ```
 
+**This does not restore a hold.** Switching profile from hold (`lock` 1)
+leaves BI on temporary (`lock` 2), and the revert call does too. Only
+re-sending the same profile engages hold, which the tool refuses. If
+`previous_lock` was 1 (hold), say so and ask the user to re-engage hold in
+UI3; don't report the revert as complete. Whether `-1` from temporary
+re-engages hold is unverified, so don't rely on it. Prefer not flipping a
+held profile at all.
+
 `bi_set_profile` accepts:
 - Profile number `0-7` — switch to that profile (requires it to differ from
   the current one; same-profile calls are rejected because BI interprets
@@ -319,9 +348,17 @@ bi_set_profile(profile=prev_profile)
 
 The tool does a mandatory `bi_get_status` pre-read to capture
 `previous_profile` and `previous_lock`, and a mandatory post-read to verify
-the requested change actually landed. The return value includes both
-`{profile, lock, previous_profile, previous_lock}` so the agent can revert
-either axis. Always revert before turn end unless the user asked for a
+the requested change actually landed. The return value is
+`{ok, verified, profile, lock, previous_profile, previous_lock}` (plus
+`verify_error_kind`/`verify_error` when unverified) so the agent can revert
+either axis. `ok` is write-acceptance only; a post-read mismatch comes back
+as `verified:false, verify_error_kind:"verify_mismatch"` rather than a
+raised error, and any verify-read failure after an accepted write (auth
+blip, unreachable, HTTP 5xx, non-JSON, 404) comes back as `verified:false`
+with `verify_error_kind` `verify_auth_blip`/`verify_unreachable`/
+`verify_error` — never raised — so `previous_*` are returned either way
+(`bi_set_camera` reports verify-read failures and mismatches the same way). `verified` is
+always present (unlike `bi_set_camera`, which omits it on a clean verify). Always revert before turn end unless the user asked for a
 persistent change.
 
 ### Rule 4 — Don't loop `bi_trigger_camera`
@@ -479,7 +516,11 @@ The mapping to `ErrorCode`:
 
 **Retry rules:** transient session-expiry is handled inside `BiClient.call`
 (one auto re-login + retry, taken only when the fail reason is auth-class
-or unclassifiable; non-auth failures like "Access denied" — per-cmd
+or unclassifiable — except that an unclassifiable fail on a MUTATING cmd
+(trigger, update; `ptz` with `button`; status/camconfig/export when carrying
+write keys — a `ptz` read with only `camera` still retries)
+raises `BiError` without a retry, since a re-POST could execute it twice;
+non-auth failures like "Access denied" — per-cmd
 capability gating on a valid session — raise immediately without a retry).
 Beyond that, the agent should NOT retry — all the typed errors above are
 durable failures that need a different input or a config fix.
@@ -491,7 +532,7 @@ durable failures that need a different input or a config fix.
 `bi_<verb>_<noun>`. Canonical verbs:
 
 - `get_` — single object, by id (`bi_get_status`, `bi_get_camera_config`,
-  `bi_get_alert_tracks`)
+  `bi_get_clip_info`)
 - `list_` — collection (`bi_list_cameras`, `bi_list_alerts`,
   `bi_list_clips`, `bi_list_log`)
 - `set_` — mutate state (`bi_set_profile`, `bi_set_ptz_preset`)

@@ -267,7 +267,13 @@ def _tool_set_profile(client: BiClients, args: dict) -> Any:
     # accept names too for ergonomics and resolve them via the login data.
     profile_num: int
     if isinstance(profile, int) or (isinstance(profile, str) and profile.lstrip("-").isdigit()):
-        profile_num = int(profile)
+        try:
+            profile_num = int(profile)
+        except ValueError as e:
+            # e.g. "--1" or "²": pass the isdigit() screen but not int().
+            raise BiBadRequest(
+                f"'profile' must be -1, 0..7, or a profile name (got {profile!r})"
+            ) from e
     else:
         if not client.login_data:
             client.login()
@@ -329,44 +335,89 @@ def _tool_set_profile(client: BiClients, args: dict) -> Any:
             f"current profile, use bi_get_status."
         )
 
+    # A -1 toggle can only be verified (and reverted) against a known
+    # previous lock. Refuse BEFORE writing rather than fire a toggle whose
+    # verify is guaranteed to fail — a "did not land" there invites a
+    # retry, i.e. a second toggle.
+    if profile_num == -1 and previous_lock is None:
+        raise BiError(
+            f"bi_set_profile profile=-1 refused: pre-read `status` returned no "
+            f"usable `lock` (got {pre_lock_raw!r}), so the hold/run toggle "
+            "could neither be verified nor reverted. Nothing was sent."
+        )
+
     raw = client.admin_call_raw("status", profile=profile_num)
 
-    # MANDATORY post-write verify. For profile=N (0..7), confirm the active
-    # profile actually flipped. For profile=-1 (toggle), confirm that `lock`
-    # actually flipped to the opposite of its previous value.
-    post = client.call("status")
-    actual_profile = post.get("profile") if isinstance(post, dict) else None
-    actual_lock_raw = post.get("lock") if isinstance(post, dict) else None
+    # MANDATORY post-write verify, via a fresh admin session + verify_call
+    # (the verify-after-write pattern shared with bi_set_camera). Once the
+    # write was accepted nothing below raises on verify trouble: `ok` stays
+    # write-acceptance, verify uncertainty goes in `verified` +
+    # `verify_error_kind`, and previous_profile/previous_lock are always
+    # returned so the agent can revert. Raising here used to drop the
+    # revert data and, for -1, invite a retry that toggled hold twice.
+    actual_profile: Any = None
+    actual_lock: int | None = None
+    verified: bool
+    verify_error_kind: str | None = None
+    verify_error: str | None = None
     try:
-        actual_lock = int(actual_lock_raw) if actual_lock_raw is not None else None
-    except (TypeError, ValueError):
-        actual_lock = None
-
-    if profile_num == -1:
-        # We toggled hold/run. Verify lock changed direction.
-        if previous_lock is None or actual_lock is None or actual_lock == previous_lock:
-            raise BiError(
-                f"bi_set_profile profile=-1 was meant to toggle schedule hold/run, "
-                f"but post-write lock={actual_lock!r} matches previous lock="
-                f"{previous_lock!r}. The toggle did not land."
-            )
+        with client.fresh_admin_session() as fresh:
+            post = client.verify_call(fresh, "status")
+    except BiError as e:
+        # ANY verify-side failure — auth/unreachable blips (typed
+        # BiVerifyInconclusive) and the structural ones verify_call lets
+        # through (HTTP 5xx, non-JSON, 404) — happens after BI accepted the
+        # write, so it must not drop the revert data. Loud via kind+message.
+        verified = False
+        verify_error_kind = (
+            e.kind if isinstance(e, BiVerifyInconclusive) else "verify_error"
+        )
+        verify_error = f"{type(e).__name__}: {e}"
     else:
-        if actual_profile != profile_num:
-            raise BiError(
-                f"bi_set_profile sent profile={profile_num} but post-write status "
-                f"shows profile={actual_profile!r}. The change may have been "
-                f"blocked by a schedule hold (lock={actual_lock!r}) or refused by "
-                f"Blue Iris. Previous profile was {previous_profile}."
+        actual_profile = post.get("profile") if isinstance(post, dict) else None
+        actual_lock_raw = post.get("lock") if isinstance(post, dict) else None
+        try:
+            actual_lock = int(actual_lock_raw) if actual_lock_raw is not None else None
+        except (TypeError, ValueError):
+            actual_lock = None
+        if profile_num == -1:
+            # We toggled hold/run. Verify lock changed direction.
+            if actual_lock is None or actual_lock == previous_lock:
+                verified = False
+                verify_error_kind = "verify_mismatch"
+                verify_error = (
+                    f"profile=-1 was meant to toggle schedule hold/run, but "
+                    f"post-write lock={actual_lock!r} matches previous lock="
+                    f"{previous_lock!r}. Check bi_get_status before retrying — "
+                    "a second -1 toggles again."
+                )
+            else:
+                verified = True
+        elif actual_profile != profile_num:
+            verified = False
+            verify_error_kind = "verify_mismatch"
+            verify_error = (
+                f"sent profile={profile_num} but post-write status shows "
+                f"profile={actual_profile!r}. The change may have been blocked "
+                f"by a schedule hold (lock={actual_lock!r}) or refused by Blue "
+                f"Iris. Previous profile was {previous_profile}."
             )
+        else:
+            verified = True
 
     if args.get("raw"):
         return raw
     shaped = shapers.shape_profile_set_result(raw, previous_profile=previous_profile)
-    # Surface the verified post-write state. `previous_lock` and `lock` are
-    # included so the agent can revert either axis cleanly.
+    # Surface the post-write state. `previous_profile`, `previous_lock` and
+    # `lock` are included so the agent can revert either axis cleanly.
     shaped["profile"] = actual_profile
     shaped["lock"] = actual_lock
+    shaped["previous_profile"] = previous_profile
     shaped["previous_lock"] = previous_lock
+    shaped["verified"] = verified
+    if verify_error_kind is not None:
+        shaped["verify_error_kind"] = verify_error_kind
+        shaped["verify_error"] = verify_error
     return shaped
 
 
@@ -1215,7 +1266,7 @@ def _pick_op(args: dict) -> tuple[str, dict[str, Any]]:
     payload: dict[str, Any] = {}
     if op_key == "rename":
         value = args["rename"]
-        if not isinstance(value, str) or not value:
+        if not isinstance(value, str) or not value.strip():
             raise BiBadRequest(
                 f"'rename' must be a non-empty string (got {value!r})"
             )
@@ -1493,6 +1544,11 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
                     previous = raw_pre.get(pre_read_key)
         elif op_name in _VERIFY_VIA_CAMLIST:
             raw_pre = client.admin_call("camlist")
+            if op_name == "rename" and not isinstance(raw_pre, list):
+                raise BiBadRequest(
+                    "bi_set_camera: camlist reply unreadable, so rename can't be "
+                    "checked for a name collision; refusing. Retry later."
+                )
             if isinstance(raw_pre, list):
                 for cam in raw_pre:
                     if isinstance(cam, dict) and cam.get("optionValue") == camera:
@@ -1509,6 +1565,25 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
                         f"bi_set_camera: camera {camera!r} not found in camlist. "
                         "Use bi_list_cameras to verify the short name."
                     )
+                if op_name == "rename":
+                    # BI accepts a duplicate long name, and live (2026-10-22)
+                    # renaming onto another camera's name wiped THAT camera's
+                    # registry key. Refuse before anything is written.
+                    wanted = payload["rename"].strip().casefold()
+                    for cam in raw_pre:
+                        if not isinstance(cam, dict) or cam.get("optionValue") == camera:
+                            continue
+                        names = (cam.get("optionDisplay"), cam.get("optionValue"))
+                        if any(
+                            isinstance(n, str) and n.strip().casefold() == wanted
+                            for n in names
+                        ):
+                            raise BiBadRequest(
+                                f"bi_set_camera: rename {payload['rename']!r} collides "
+                                f"with camera {cam.get('optionValue')!r}. BI accepts "
+                                "duplicate names and doing so destroyed the other "
+                                "camera's config; pick a unique name."
+                            )
         else:
             # reset / reboot — no meaningful "previous" value to capture for
             # revert (you can't un-reset). Pre-read camlist anyway so we know
@@ -1523,9 +1598,12 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
                     raise BiBadRequest(
                         f"bi_set_camera: camera {camera!r} not found in camlist."
                     )
-    except BiBadRequest:
-        raise
     except BiError as e:
+        # Typed subclasses (BiBadRequest, BiUnreachable, BiAdminAuthFailed,
+        # BiNotFound, ...) carry their own recovery hint — propagate as-is.
+        # Only a bare BiError gets the op/camera context added.
+        if type(e) is not BiError:
+            raise
         raise BiError(
             f"bi_set_camera pre-read failed for op={op_name!r} on camera "
             f"{camera!r}: {e}"
@@ -1549,12 +1627,13 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
     new_value: Any = None
     verify_method: str | None = None
     extras: dict[str, Any] = {}
-    verify_inconclusive: BiVerifyInconclusive | None = None
+    verify_inconclusive: BiError | None = None
+    verify_mismatch: str | None = None
     if op_name in _VERIFY_VIA_CAMCONFIG:
         verify_method = "camconfig"
         try:
             new_value, _post = _verify_camconfig(client, camera, op_name, payload)
-        except BiVerifyInconclusive as e:
+        except BiError as e:  # any verify-side failure; write already accepted
             verify_inconclusive = e
         if verify_inconclusive is None:
             # Per-op verification of landing — only meaningful when the
@@ -1568,22 +1647,36 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
                     # Document the known BI quirk: profile=-1 on an enabled cam
                     # silently coerces to the current global. Surface a more
                     # useful error than a generic mismatch.
+                    # The write was accepted, so report the mismatch with
+                    # `previous` intact instead of raising.
                     if want_profile == -1:
-                        raise BiError(
-                            f"bi_set_camera profile=-1 was rejected by BI: "
+                        verify_mismatch = (
+                            f"profile=-1 was rejected by BI: "
                             f"post-read shows profile={got_profile!r} (likely the "
                             "current global). On an enabled camera, BI silently "
                             "coerces profile=-1 to the global profile. To clear "
                             "the per-camera override, call enable=false (which "
                             "auto-resets profile to -1) then enable=true."
                         )
-                    raise BiError(
-                        f"bi_set_camera sent profile={want_profile} but post-read "
-                        f"shows profile={got_profile!r}. Change did not land."
+                    else:
+                        verify_mismatch = (
+                            f"sent profile={want_profile} but post-read "
+                            f"shows profile={got_profile!r}. Change did not land."
+                        )
+                elif want_lock is False and got_lock == 2:
+                    # Known BI 5.9.9.71 quirk: after an earlier lock=true,
+                    # lock=false is sticky-coerced to the undocumented 2.
+                    # The write was accepted; report what landed instead of
+                    # raising (which dropped `previous`).
+                    verify_mismatch = (
+                        "sent lock=False but post-read shows lock=2 (BI "
+                        "sticky-lock quirk). To fully clear the override, "
+                        "call enable=false (resets profile=-1, lock=0), "
+                        "then enable=true."
                     )
-                if want_lock is not None and got_lock != int(want_lock):
-                    raise BiError(
-                        f"bi_set_camera sent lock={want_lock} but post-read "
+                elif want_lock is not None and got_lock != int(want_lock):
+                    verify_mismatch = (
+                        f"sent lock={want_lock} but post-read "
                         f"shows lock={got_lock!r}."
                     )
             elif op_name == "pause":
@@ -1603,8 +1696,8 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
                     # Special case: BI's `output` write reply is known to echo
                     # the PRE-write value, but post-camconfig should be correct.
                     # Any mismatch here is a real failure.
-                    raise BiError(
-                        f"bi_set_camera op={op_name!r} sent {want!r} but post-read "
+                    verify_mismatch = (
+                        f"op={op_name!r} sent {want!r} but post-read "
                         f"shows {new_value!r}. Change did not land. "
                         f"(BI footgun: write reply may echo pre-write value; we "
                         f"verify via a separate camconfig read.)"
@@ -1613,7 +1706,7 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
         verify_method = "camlist"
         try:
             new_value, _row = _verify_camlist(client, camera, op_name)
-        except BiVerifyInconclusive as e:
+        except BiError as e:  # any verify-side failure; write already accepted
             verify_inconclusive = e
         if verify_inconclusive is None:
             want = payload.get("rename" if op_name == "rename" else op_name)
@@ -1621,11 +1714,10 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
             # truthiness. For rename, payload['rename'] is the new long name and
             # the verify field is optionDisplay.
             if want is not None and new_value != want:
-                raise BiError(
-                    f"bi_set_camera op={op_name!r} sent {want!r} but post-read "
+                verify_mismatch = (
+                    f"op={op_name!r} sent {want!r} but post-read "
                     f"camlist shows {new_value!r} after retry. Change may have "
-                    "been silently rejected by BI (e.g. unique-name collision "
-                    "for rename)."
+                    "been silently rejected by BI."
                 )
     elif op_name in _VERIFY_VIA_STREAM_DIP:
         # Capture the pre-write online state for the dip detector. The
@@ -1655,7 +1747,7 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
             dip_info = _verify_stream_dip(
                 client, camera, op_name, pre_isOnline=pre_isOnline
             )
-        except BiVerifyInconclusive as e:
+        except BiError as e:  # any verify-side failure; write already accepted
             verify_inconclusive = e
             dip_info = {"observed_offline_transition": False, "samples": []}
         extras.update(dip_info)
@@ -1669,18 +1761,17 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
         elif op_name == "reset":
             # Defense in depth: pre-check above already refused offline cams,
             # but the dip detector can still miss the transition (e.g. cam
-            # cycled too fast, network blip). Fail closed if no True→False
-            # transition seen.
+            # cycled too fast, network blip). Report verified=False if no
+            # True→False transition seen (not raised: the cmd was accepted).
             if not saw_offline:
-                raise BiError(
-                    f"bi_set_camera reset on {camera!r}: BI accepted the cmd "
+                verify_mismatch = (
+                    f"reset on {camera!r}: BI accepted the cmd "
                     "but no isOnline True→False transition was observed in "
                     "the sampling window (~10s). A successful reset always "
                     "produces a brief stream dip; absence implies the cmd "
-                    "was silently ignored. "
-                    f"Samples: {dip_info.get('samples')!r}"
+                    "was silently ignored."
                 )
-            verified_value = True
+            verified_value = saw_offline
         else:  # reboot
             # Hardware reboot is too slow to fully verify here: BI keeps the
             # stream up for ~T+15s after the cmd is sent, then offline for
@@ -1713,12 +1804,19 @@ def _tool_set_camera(client: BiClients, args: dict) -> Any:
     verified_kwarg: bool | None = None
     if op_name in _VERIFY_VIA_STREAM_DIP:
         verified_kwarg = verified_value  # type: ignore[name-defined]
-    elif verify_inconclusive is not None:
+    elif verify_inconclusive is not None or verify_mismatch is not None:
         verified_kwarg = False
 
     if verify_inconclusive is not None:
-        extras["verify_error_kind"] = verify_inconclusive.kind
+        extras["verify_error_kind"] = (
+            verify_inconclusive.kind
+            if isinstance(verify_inconclusive, BiVerifyInconclusive)
+            else "verify_error"
+        )
         extras["verify_error"] = str(verify_inconclusive)
+    elif verify_mismatch is not None:
+        extras["verify_error_kind"] = "verify_mismatch"
+        extras["verify_error"] = verify_mismatch
 
     return shapers.shape_camera_set_result(
         raw,
@@ -1897,8 +1995,11 @@ def register() -> None:
             "{previous_profile, previous_lock}; mandatory post-read verifies "
             "the change actually landed. Same-profile calls (profile==current) "
             "are refused because BI interprets them as 'engage hold' (use -1 "
-            "explicitly for that). Returns {ok, profile, lock, previous_profile, "
-            "previous_lock} so the caller can revert either axis. REVERT BEFORE "
+            "explicitly for that). Returns {ok, verified, profile, lock, "
+            "previous_profile, previous_lock} (+ verify_error_kind/"
+            "verify_error when unverified; a mismatch is verified:false, "
+            "verify_error_kind='verify_mismatch', not an error) so the "
+            "caller can revert either axis. REVERT BEFORE "
             "TURN END unless the user asked for a persistent change. Requires "
             "BI_MCP_ALLOW_MUTATIONS=1."
         ),
@@ -2038,7 +2139,9 @@ def register() -> None:
             "Mandatory post-read verifies the change actually landed — per "
             "op via either camconfig (enable/audio/output/profile_lock/pause) "
             "or camlist (rename/hide/manrec) or stream-transition sampling "
-            "(reset/reboot). "
+            "(reset/reboot). After an accepted write, a mismatch or failed "
+            "post-read returns ok:true, verified:false + verify_error_kind "
+            "with `previous` intact, never an error. "
             "**Footguns**: (1) BI silently accepts unknown camconfig fields "
             "and ignores them — schema enforces `additionalProperties:false` "
             "to catch typos. (2) `output` write reply echoes the PRE-write "
@@ -2063,7 +2166,7 @@ def register() -> None:
                 },
                 "rename": {
                     "type": "string",
-                    "description": "Change camera long name. Verified via camlist.optionDisplay; async ~2-3s.",
+                    "description": "Change camera long name. Refused if it matches another camera's long or short name (BI accepts duplicates and that wiped the other camera's config). Verified via camlist.optionDisplay; async ~2-3s.",
                 },
                 "hide": {
                     "type": "boolean",
